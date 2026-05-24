@@ -131,7 +131,7 @@ Both as `root`, `Restart=always`. Saving config in the UI calls `systemctl resta
 
 - **Canonical project root is `/home/bulik/apps/openwrt-monitor/`** — moved here from `/var/www/openwrt-monitor/` so the tree is bulik-owned (no sudo or `safe.directory` friction for git or edits) and no longer mixed with the unrelated voucher app. Systemd units now `ExecStart` directly from this tree; there is no `/usr/local/bin/` copy of the Python files to keep in sync.
 - **Git is initialized.** `git init` on the project root with `main` branch and an initial snapshot commit. `.gitignore` excludes the wifi voucher app, `.claude/` state, logs, `*.backup-*`, and secrets.
-- **CDNs in the critical path.** `dashboard.html`, `config.html`, `logs.html` all `<link>` Font Awesome and Google Fonts from public CDNs. The Atom box is intranet-facing — if its uplink drops, the UI stalls. Vendor all assets into `/static/` and remove the `<link>` tags.
+- **Font Awesome is vendored at `static/fontawesome/`.** Templates link `/static/fontawesome/css/all.min.css` — no public CDN in the critical path. If you need a new icon style or a different FA version, drop the woff2+ttf into `static/fontawesome/webfonts/` and update the CSS; do NOT add a CDN link back.
 - **Auth dies hard if `auth.json` is missing.** `flask_app.py` calls `sys.exit(1)` at import time if `/etc/openwrt-monitor/auth.json` is absent or malformed. This is intentional — there is no fallback to hardcoded credentials. Bootstrap with `sudo python3 scripts/init_auth.py`.
 - **SSH multiplex is already set up.** `/etc/openwrt-monitor/ssh_config` has `ControlMaster auto`, `ControlPersist 10m`, `ServerAliveInterval 30`. Always pass `-F /etc/openwrt-monitor/ssh_config` if you open a raw `ssh` subprocess. (In v2, `asyncssh` replaces the need entirely.)
 - **`clients` table is destructive.** Don't try to query historical client data from it — there isn't any. History goes in the new `*_history` tables (§5 P2).
@@ -154,7 +154,7 @@ Ordered by **impact / risk**. Don't reorder without good reason — earlier item
 0. **Relocate project tree to `/home/bulik/apps/openwrt-monitor/`** so it is bulik-owned and unmixed from the wifi voucher app. Update `template_folder`/`static_folder` in `flask_app.py` and `WorkingDirectory`/`ExecStart` in the systemd units. **Done.**
 1. **`git init`** at the new project root, `main` branch, initial snapshot commit, `.gitignore`. **Done.**
 2. **Move hardcoded credentials out of `flask_app.py`** into `/etc/openwrt-monitor/auth.json` with an Argon2 hash. Stop the in-place source rewrite. **Done.**
-3. **Vendor Font Awesome + fonts into `/static/`.** Drop every CDN `<link>` from `templates/*.html`.
+3. **Vendor Font Awesome + fonts into `/static/`.** Drop every CDN `<link>` from `templates/*.html`. **Done** — Font Awesome 6.4.0 Free at `static/fontawesome/{css,webfonts}/`. Only the woff2 + ttf for `solid-900`, `regular-400`, `brands-400` are vendored (skipped `v4compatibility` and `svg-with-js` since unused).
 4. **logrotate config** for `/var/log/openwrt-collector.log` (e.g. 5 MB × 5 files, `copytruncate`).
 
 ### P1 — Async migration (the actual unlock for 30 routers)
