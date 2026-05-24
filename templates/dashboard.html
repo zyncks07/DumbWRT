@@ -74,146 +74,43 @@
             transform: translateY(-1px);
         }
         
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(6, 1fr);
-            gap: 10px;
-            margin-bottom: 12px;
-        }
-        
-        .stat-card {
+        /* Compact stats strip — fits the 30-routers-no-scroll target. */
+        .stats-strip {
+            display: flex;
             background: var(--card-bg);
             border: 1px solid var(--border-a);
-            border-radius: 8px;
-            padding: 12px;
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
+            border-radius: 10px;
+            padding: 8px 18px;
+            margin-bottom: 12px;
+            gap: 28px;
+            align-items: center;
+            flex-wrap: wrap;
         }
-        
-        .stat-label {
-            font-size: 9px;
+        .stat-pill {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+        }
+        .stat-pill > i {
             color: var(--fg-muted);
+            font-size: 13px;
+        }
+        .stat-pill-label {
+            color: var(--fg-muted);
+            font-size: 10px;
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            font-weight: 600;
         }
-        
-        .stat-value {
-            font-size: 24px;
+        .stat-pill-value {
             font-weight: 700;
+            font-size: 15px;
             background: linear-gradient(135deg, var(--accent), var(--accent-2));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
+            font-variant-numeric: tabular-nums;
         }
-        
-        .stat-icon {
-            font-size: 16px;
-            opacity: 0.3;
-        }
-        
-        .routers-grid {
-            display: grid;
-            gap: 10px;
-        }
-        
-        .router-card {
-            background: var(--card-bg);
-            border: 1px solid var(--border-a);
-            border-radius: 8px;
-            overflow: hidden;
-            transition: all 0.3s;
-        }
-        
-        .router-card.offline {
-            opacity: 0.5;
-            border-color: rgba(255, 71, 87, 0.3);
-        }
-        
-        .router-header {
-            padding: 12px 16px;
-            cursor: pointer;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            transition: all 0.3s;
-        }
-        
-        .router-header:hover {
-            background: var(--border-d);
-        }
-        
-        .router-info {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-        
-        .router-status {
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background: var(--accent-2);
-            box-shadow: 0 0 8px rgba(0, 255, 136, 0.5);
-            animation: pulse 2s infinite;
-        }
-        
-        .router-status.offline {
-            background: var(--err);
-            box-shadow: 0 0 8px rgba(255, 71, 87, 0.5);
-            animation: none;
-        }
-        
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-        
-        .router-name {
-            font-size: 14px;
-            font-weight: 600;
-            color: var(--accent);
-        }
-        
-        .router-ip {
-            font-size: 10px;
-            color: var(--fg-muted);
-            font-family: 'Courier New', monospace;
-        }
-        
-        .router-stats {
-            display: flex;
-            gap: 16px;
-            align-items: center;
-        }
-        
-        .router-stat {
-            text-align: center;
-        }
-        
-        .router-stat-value {
-            font-size: 16px;
-            font-weight: 700;
-            color: var(--accent);
-        }
-        
-        .router-stat-label {
-            font-size: 8px;
-            color: var(--fg-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        
-        .router-content {
-            max-height: 0;
-            overflow: hidden;
-            transition: max-height 0.3s ease-out;
-        }
-        
-        .router-content.expanded {
-            max-height: 2000px;
-        }
-        
+
         .interfaces-list {
             padding: 0 16px 12px;
         }
@@ -341,15 +238,6 @@
             100% { transform: rotate(360deg); }
         }
         
-        .expand-icon {
-            transition: transform 0.3s;
-            font-size: 12px;
-        }
-        
-        .expand-icon.rotated {
-            transform: rotate(180deg);
-        }
-
         /* ---- Dense router table (P4 #16) ---- */
         .router-table {
             background: var(--card-bg);
@@ -475,48 +363,31 @@
         </div>
     </div>
 
-    <div class="stats-grid" id="statsGrid">
-        <div class="stat-card">
-            <div class="stat-label">
-                <i class="fas fa-router stat-icon"></i>
-                Total Routers
-            </div>
-            <div class="stat-value" id="totalRouters">0</div>
+    <div class="stats-strip">
+        <div class="stat-pill">
+            <i class="fas fa-router"></i>
+            <span class="stat-pill-label">Routers</span>
+            <span class="stat-pill-value"><span id="onlineRouters">0</span> / <span id="totalRouters">0</span></span>
         </div>
-        <div class="stat-card">
-            <div class="stat-label">
-                <i class="fas fa-check-circle stat-icon"></i>
-                Online Routers
-            </div>
-            <div class="stat-value" id="onlineRouters">0</div>
+        <div class="stat-pill">
+            <i class="fas fa-wifi"></i>
+            <span class="stat-pill-label">Interfaces</span>
+            <span class="stat-pill-value" id="totalInterfaces">0</span>
         </div>
-        <div class="stat-card">
-            <div class="stat-label">
-                <i class="fas fa-wifi stat-icon"></i>
-                Total Interfaces
-            </div>
-            <div class="stat-value" id="totalInterfaces">0</div>
+        <div class="stat-pill">
+            <i class="fas fa-users"></i>
+            <span class="stat-pill-label">Clients</span>
+            <span class="stat-pill-value" id="totalClients">0</span>
         </div>
-        <div class="stat-card">
-            <div class="stat-label">
-                <i class="fas fa-users stat-icon"></i>
-                Total Clients
-            </div>
-            <div class="stat-value" id="totalClients">0</div>
+        <div class="stat-pill">
+            <i class="fas fa-signal"></i>
+            <span class="stat-pill-label">2.4 GHz</span>
+            <span class="stat-pill-value" id="clients24">0</span>
         </div>
-        <div class="stat-card">
-            <div class="stat-label">
-                <i class="fas fa-signal stat-icon"></i>
-                2.4GHz Clients
-            </div>
-            <div class="stat-value" id="clients24">0</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-label">
-                <i class="fas fa-signal stat-icon"></i>
-                5GHz Clients
-            </div>
-            <div class="stat-value" id="clients5">0</div>
+        <div class="stat-pill">
+            <i class="fas fa-signal"></i>
+            <span class="stat-pill-label">5 GHz</span>
+            <span class="stat-pill-value" id="clients5">0</span>
         </div>
     </div>
 
@@ -617,7 +488,7 @@
         function toggleRouter(routerIp) {
             const safeIP = routerIp.replace(/\./g, '_');
             const row = document.getElementById(`router-row-${safeIP}`);
-            const detail = document.getElementById(`router-content-${safeIP}`);
+            const detail = document.getElementById(`router-detail-${safeIP}`);
             if (!row || !detail) return;
             if (expandedRouters.has(routerIp)) {
                 expandedRouters.delete(routerIp);
@@ -712,7 +583,7 @@
                             const safeIP = router.ip.replace(/\./g, '_');
                             const isExpanded = expandedRouters.has(router.ip);
                             html += renderRouterRow(router, safeIP, isExpanded);
-                            html += `<div class="router-detail${isExpanded ? ' expanded' : ''}" id="router-content-${safeIP}">
+                            html += `<div class="router-detail${isExpanded ? ' expanded' : ''}" id="router-detail-${safeIP}">
                                 <div class="loading"><div class="spinner"></div>Loading interfaces...</div>
                             </div>`;
                         });
@@ -753,7 +624,7 @@
                 .then(res => res.json())
                 .then(data => {
                     const interfaces = data.interfaces || [];
-                    const container = document.getElementById(`router-content-${safeIP}`);
+                    const container = document.getElementById(`router-detail-${safeIP}`);
                     
                     if (!container) return; // Router was removed
                     
@@ -840,7 +711,7 @@
                 .catch(err => {
                     console.error(`Error fetching details for ${routerIp}:`, err);
                     const safeIP = routerIp.replace(/\./g, '_');
-                    const container = document.getElementById(`router-content-${safeIP}`);
+                    const container = document.getElementById(`router-detail-${safeIP}`);
                     if (container) {
                         container.innerHTML = '<div class="no-clients">Error loading interface data</div>';
                     }

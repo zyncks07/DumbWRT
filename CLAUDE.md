@@ -37,7 +37,6 @@ A web app that monitors WiFi clients across a fleet of OpenWrt routers (currentl
 | Collector log | `/var/log/openwrt-collector.log` (logrotate config installed; 5 MB × 5) |
 | Live systemd units | `/etc/systemd/system/openwrt-collector.service`, `openwrt-dashboard.service` — now `ExecStart` from the project root |
 | Unrelated voucher app | `/var/www/openwrt-monitor/wifi/` — separate Node/Express app on port 3000; **NOT part of the monitor**, left in place when the monitor moved |
-| Stray old dashboard file | `/home/bulik/apps/openwrt-monitor/templatesclear` — old variant carried along by the rsync; safe to delete |
 
 ### Tables in `monitor.db`
 
@@ -130,7 +129,6 @@ The original plan in this section called for a Flask → FastAPI migration plus 
 - **One SSH key for everything.** Documented assumption. If that changes, half the code changes too.
 - **Deploying a change today** = edit file → `systemctl restart openwrt-collector openwrt-dashboard`. After v2 → `systemctl restart openwrt-monitor`.
 - **`/var/www/openwrt-monitor/wifi/` is a separate app.** Captive-portal voucher dispenser, port 3000 (Node/Express). It used to be nested inside this project when the monitor lived at `/var/www/openwrt-monitor/`; the monitor moved to `~/apps/openwrt-monitor/` in P0 #0 and the wifi app stayed put. It is gitignored. Don't touch it from this repo.
-- **`templatesclear` at the project root** is an old standalone dashboard file carried along by the move. Delete it once you're sure nothing references it.
 - **Saving config restarts services.** `POST /api/config` calls `systemctl restart openwrt-collector openwrt-dashboard`. Expect a brief gap in polling. In v2 (single process), prefer a SIGHUP-style live reload.
 - **Storage today:** ~31 MB DB, ~20 MB log. With history added and 30 routers, both will grow fast. Retention is non-optional.
 
