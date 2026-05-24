@@ -160,11 +160,16 @@ def api_clients():
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT c.*, i.ssid, i.frequency,
-               a.ip AS arp_ip, a.hostname AS arp_hostname
+        SELECT c.*,
+               i.ssid, i.frequency,
+               r.hostname AS router_hostname,
+               a.ip       AS arp_ip,
+               a.hostname AS arp_hostname
         FROM clients c
         LEFT JOIN interfaces i
           ON c.router_ip = i.router_ip AND c.interface = i.interface
+        LEFT JOIN routers r
+          ON c.router_ip = r.ip
         LEFT JOIN arp_entries a
           ON lower(c.mac) = a.mac
         ORDER BY c.signal DESC
@@ -172,6 +177,12 @@ def api_clients():
     clients = [dict(row) for row in cursor.fetchall()]
     conn.close()
     return jsonify({'success': True, 'clients': clients, 'total': len(clients)})
+
+
+@app.route('/clients')
+@login_required
+def clients_page():
+    return render_template('clients.html')
 
 @app.route('/api/stats')
 @login_required

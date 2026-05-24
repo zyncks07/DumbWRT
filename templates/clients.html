@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Clients — OpenWrt Monitor</title>
+    <link rel="stylesheet" href="/static/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/static/theme.css">
+    <script>(function(){try{var t=localStorage.getItem('theme');var d=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.setAttribute('data-theme',t||(d?'dark':'light'))}catch(e){}})();</script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, var(--bg-0) 0%, var(--bg-1) 100%);
+            color: var(--fg);
+            min-height: 100vh;
+            padding: 15px;
+            font-size: 12px;
+        }
+        .header {
+            background: var(--card-bg);
+            border: 1px solid var(--border-a);
+            border-radius: 10px;
+            padding: 12px 20px;
+            margin-bottom: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 {
+            font-size: 19px;
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .header-actions { display: flex; gap: 8px; align-items: center; }
+        .btn {
+            background: var(--card-bg);
+            border: 1px solid var(--border-b);
+            color: var(--fg);
+            padding: 7px 14px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 11px;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.15s;
+            font-family: inherit;
+        }
+        .btn:hover {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--bg-0);
+        }
+
+        .toolbar {
+            background: var(--card-bg);
+            border: 1px solid var(--border-a);
+            border-radius: 10px;
+            padding: 10px 16px;
+            margin-bottom: 12px;
+            display: flex;
+            gap: 14px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .toolbar label {
+            color: var(--fg-muted);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+        .toolbar input[type="text"],
+        .toolbar select {
+            background: var(--card-bg-3);
+            border: 1px solid var(--border-a);
+            color: var(--fg);
+            padding: 6px 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            font-family: inherit;
+        }
+        .toolbar input[type="text"] { width: 280px; }
+        .toolbar input:focus, .toolbar select:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .toolbar .count {
+            margin-left: auto;
+            color: var(--fg-muted);
+            font-size: 11px;
+            font-variant-numeric: tabular-nums;
+        }
+        .toolbar .count strong { color: var(--fg); }
+
+        .clients-wrap {
+            background: var(--card-bg);
+            border: 1px solid var(--border-a);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        table.clients {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        table.clients thead th {
+            position: sticky;
+            top: 0;
+            background: var(--card-bg-3);
+            border-bottom: 1px solid var(--border-a);
+            color: var(--fg-muted);
+            text-transform: uppercase;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            padding: 10px 12px;
+            text-align: left;
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+        }
+        table.clients thead th:hover { color: var(--accent); }
+        table.clients thead th .arrow {
+            display: inline-block;
+            margin-left: 4px;
+            opacity: 0.5;
+            font-size: 9px;
+        }
+        table.clients thead th.sorted .arrow { opacity: 1; color: var(--accent); }
+        table.clients tbody tr {
+            border-bottom: 1px solid var(--border-d);
+        }
+        table.clients tbody tr:hover { background: var(--border-d); }
+        table.clients td {
+            padding: 8px 12px;
+            vertical-align: middle;
+        }
+        td.mono {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+        }
+        td.muted { color: var(--fg-muted); }
+        td.num   { text-align: right; font-variant-numeric: tabular-nums; }
+        .identity .hostname {
+            font-weight: 600;
+            color: var(--fg);
+        }
+        .identity .id-sub {
+            color: var(--fg-muted);
+            font-size: 10px;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        .band-badge {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+        }
+        .band-24 {
+            background: rgba(0, 212, 255, 0.15);
+            color: var(--accent);
+            border: 1px solid var(--border-b);
+        }
+        .band-5 {
+            background: rgba(0, 255, 136, 0.15);
+            color: var(--accent-2);
+            border: 1px solid var(--accent-2);
+        }
+        .signal-cell {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 110px;
+        }
+        .signal-bar {
+            width: 60px;
+            height: 6px;
+            background: var(--card-bg-2);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .signal-fill {
+            height: 100%;
+            background: var(--ok);
+        }
+        .signal-fill.fair { background: var(--warn); }
+        .signal-fill.poor { background: var(--err); }
+        .empty {
+            padding: 40px;
+            text-align: center;
+            color: var(--fg-muted);
+        }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1><i class="fas fa-users"></i> Clients</h1>
+    <div class="header-actions">
+        <a href="/dashboard" class="btn"><i class="fas fa-gauge-high"></i> Dashboard</a>
+        <a href="/logs" class="btn"><i class="fas fa-terminal"></i> Logs</a>
+        <a href="/config" class="btn"><i class="fas fa-cog"></i> Settings</a>
+        <a href="/maintenance" class="btn"><i class="fas fa-database"></i> Maintenance</a>
+        <button id="themeToggle" class="btn" title="Toggle theme" aria-label="Toggle theme"></button>
+        <a href="/logout" class="btn"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+</div>
+
+<div class="toolbar">
+    <label for="q">Filter</label>
+    <input type="text" id="q" placeholder="hostname, IP, MAC, router, SSID…">
+    <label for="band">Band</label>
+    <select id="band">
+        <option value="">All</option>
+        <option value="24">2.4 GHz</option>
+        <option value="5">5 GHz</option>
+    </select>
+    <label for="router">Router</label>
+    <select id="router"><option value="">All</option></select>
+    <span class="count"><strong id="visibleCount">0</strong> / <span id="totalCount">0</span> clients</span>
+</div>
+
+<div class="clients-wrap">
+    <table class="clients" id="clientsTable">
+        <thead>
+            <tr id="headRow">
+                <th data-key="identity">Hostname / IP <span class="arrow">▼</span></th>
+                <th data-key="mac">MAC <span class="arrow">▼</span></th>
+                <th data-key="router">Router <span class="arrow">▼</span></th>
+                <th data-key="ssid">SSID <span class="arrow">▼</span></th>
+                <th data-key="band">Band <span class="arrow">▼</span></th>
+                <th data-key="signal">Signal <span class="arrow">▼</span></th>
+                <th data-key="rx_rate" class="num">RX <span class="arrow">▼</span></th>
+                <th data-key="tx_rate" class="num">TX <span class="arrow">▼</span></th>
+                <th data-key="rx_bytes" class="num">RX Total <span class="arrow">▼</span></th>
+                <th data-key="tx_bytes" class="num">TX Total <span class="arrow">▼</span></th>
+                <th data-key="connected_time" class="num">Connected <span class="arrow">▼</span></th>
+                <th data-key="inactive" class="num">Inactive <span class="arrow">▼</span></th>
+            </tr>
+        </thead>
+        <tbody id="clientsBody">
+            <tr><td colspan="12" class="empty">Loading…</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+let allClients = [];
+let sortState = { key: 'signal', dir: 'desc' };
+
+function fmtRate(r) {
+    if (!r) return '—';
+    if (r >= 1000) return (r/1000).toFixed(1) + ' Gbps';
+    return r + ' Mbps';
+}
+function fmtBytes(n) {
+    if (!n) return '0';
+    const u = ['B','KB','MB','GB','TB'];
+    let i = Math.floor(Math.log(n) / Math.log(1024));
+    return (n / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1) + ' ' + u[i];
+}
+function fmtSeconds(s) {
+    if (s == null) return '—';
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    if (m < 60) return m + 'm';
+    const h = Math.floor(m / 60);
+    if (h < 24) return h + 'h ' + (m % 60) + 'm';
+    return Math.floor(h / 24) + 'd ' + (h % 24) + 'h';
+}
+function bandOf(freq) {
+    if (!freq) return null;
+    return freq < 3000 ? '24' : '5';
+}
+function signalClass(s) {
+    if (s == null) return '';
+    if (s >= -60) return '';
+    if (s >= -75) return 'fair';
+    return 'poor';
+}
+function signalPct(s) {
+    return Math.max(0, Math.min(100, ((s + 90) / 60) * 100));
+}
+
+function clientKey(c, key) {
+    switch (key) {
+        case 'identity': return (c.arp_hostname || c.arp_ip || c.mac || '').toLowerCase();
+        case 'mac':      return (c.mac || '').toLowerCase();
+        case 'router':   return (c.router_hostname || c.router_ip || '').toLowerCase();
+        case 'ssid':     return (c.ssid || '').toLowerCase();
+        case 'band':     return bandOf(c.frequency) || '';
+        case 'signal':   return c.signal ?? -200;
+        case 'rx_rate':  return c.rx_rate || 0;
+        case 'tx_rate':  return c.tx_rate || 0;
+        case 'rx_bytes': return c.rx_bytes || 0;
+        case 'tx_bytes': return c.tx_bytes || 0;
+        case 'connected_time': return c.connected_time || 0;
+        case 'inactive': return c.inactive || 0;
+    }
+    return '';
+}
+
+function renderRows() {
+    const q = $('q').value.trim().toLowerCase();
+    const band = $('band').value;
+    const router = $('router').value;
+
+    const filtered = allClients.filter(c => {
+        if (band && bandOf(c.frequency) !== band) return false;
+        if (router && c.router_ip !== router) return false;
+        if (!q) return true;
+        const hay = [
+            c.arp_hostname, c.arp_ip, c.mac,
+            c.router_hostname, c.router_ip,
+            c.ssid, c.interface,
+        ].filter(Boolean).join(' ').toLowerCase();
+        return hay.includes(q);
+    });
+
+    const { key, dir } = sortState;
+    filtered.sort((a, b) => {
+        const av = clientKey(a, key);
+        const bv = clientKey(b, key);
+        if (av < bv) return dir === 'asc' ? -1 : 1;
+        if (av > bv) return dir === 'asc' ? 1 : -1;
+        return 0;
+    });
+
+    $('visibleCount').textContent = filtered.length;
+    $('totalCount').textContent = allClients.length;
+
+    const body = $('clientsBody');
+    if (filtered.length === 0) {
+        body.innerHTML = '<tr><td colspan="12" class="empty">No clients match the current filter.</td></tr>';
+        return;
+    }
+    body.innerHTML = filtered.map(c => {
+        const host = c.arp_hostname || '';
+        const ip   = c.arp_ip || '';
+        const ident = host
+            ? `<div class="hostname">${host}</div><div class="id-sub">${ip || c.mac}</div>`
+            : (ip
+                ? `<div class="hostname">${ip}</div><div class="id-sub">${c.mac}</div>`
+                : `<div class="mono">${c.mac}</div>`);
+        const band = bandOf(c.frequency);
+        const bandHtml = band
+            ? `<span class="band-badge band-${band}">${band === '24' ? '2.4 GHz' : '5 GHz'}</span>`
+            : '<span class="muted">—</span>';
+        const sigPct = signalPct(c.signal);
+        const sigCls = signalClass(c.signal);
+        return `
+            <tr>
+                <td class="identity">${ident}</td>
+                <td class="mono muted">${c.mac || ''}</td>
+                <td>${c.router_hostname || c.router_ip || ''}</td>
+                <td>${c.ssid || '<span class="muted">—</span>'}</td>
+                <td>${bandHtml}</td>
+                <td>
+                    <div class="signal-cell">
+                        <div class="signal-bar"><div class="signal-fill ${sigCls}" style="width:${sigPct}%"></div></div>
+                        <span class="mono">${c.signal ?? '—'} dBm</span>
+                    </div>
+                </td>
+                <td class="num mono">${fmtRate(c.rx_rate)}</td>
+                <td class="num mono">${fmtRate(c.tx_rate)}</td>
+                <td class="num mono">${fmtBytes(c.rx_bytes)}</td>
+                <td class="num mono">${fmtBytes(c.tx_bytes)}</td>
+                <td class="num">${fmtSeconds(c.connected_time)}</td>
+                <td class="num">${fmtSeconds(c.inactive)}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function updateHeaderArrows() {
+    document.querySelectorAll('#headRow th').forEach(th => {
+        const isSorted = th.dataset.key === sortState.key;
+        th.classList.toggle('sorted', isSorted);
+        const arrow = th.querySelector('.arrow');
+        if (arrow) arrow.textContent = isSorted ? (sortState.dir === 'asc' ? '▲' : '▼') : '▼';
+    });
+}
+
+function populateRouterSelect() {
+    const sel = $('router');
+    const current = sel.value;
+    const seen = new Map();
+    allClients.forEach(c => {
+        if (c.router_ip && !seen.has(c.router_ip)) {
+            seen.set(c.router_ip, c.router_hostname || c.router_ip);
+        }
+    });
+    const opts = ['<option value="">All</option>'];
+    [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1])).forEach(([ip, name]) => {
+        opts.push(`<option value="${ip}">${name}</option>`);
+    });
+    sel.innerHTML = opts.join('');
+    if (current && seen.has(current)) sel.value = current;
+}
+
+async function load() {
+    try {
+        const r = await fetch('/api/clients');
+        const d = await r.json();
+        allClients = d.clients || [];
+        populateRouterSelect();
+        renderRows();
+    } catch (err) {
+        console.error('load failed', err);
+    }
+}
+
+document.querySelectorAll('#headRow th').forEach(th => {
+    th.addEventListener('click', () => {
+        const key = th.dataset.key;
+        if (sortState.key === key) {
+            sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+        } else {
+            sortState.key = key;
+            sortState.dir = (key === 'identity' || key === 'mac' || key === 'router' || key === 'ssid' || key === 'band') ? 'asc' : 'desc';
+        }
+        updateHeaderArrows();
+        renderRows();
+    });
+});
+
+let qTimer = null;
+$('q').addEventListener('input', () => {
+    clearTimeout(qTimer);
+    qTimer = setTimeout(renderRows, 100);
+});
+$('band').addEventListener('change', renderRows);
+$('router').addEventListener('change', renderRows);
+
+updateHeaderArrows();
+load();
+setInterval(load, 10000);
+</script>
+<script src="/static/theme.js"></script>
+</body>
+</html>
