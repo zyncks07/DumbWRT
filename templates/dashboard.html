@@ -349,6 +349,88 @@
         .expand-icon.rotated {
             transform: rotate(180deg);
         }
+
+        /* ---- Dense router table (P4 #16) ---- */
+        .router-table {
+            background: var(--card-bg);
+            border: 1px solid var(--border-a);
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        .router-th, .router-tr {
+            display: grid;
+            grid-template-columns: 28px minmax(140px, 1.4fr) 110px 60px 60px 60px 64px minmax(90px, 1fr) 28px;
+            align-items: center;
+            gap: 10px;
+            padding: 0 14px;
+            font-size: 12px;
+        }
+        .router-th {
+            height: 32px;
+            color: var(--fg-muted);
+            text-transform: uppercase;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--border-a);
+            background: var(--card-bg-3);
+        }
+        .router-th .num { text-align: center; }
+        .router-tr {
+            height: 36px;
+            border-bottom: 1px solid var(--border-d);
+            cursor: pointer;
+            transition: background 0.1s;
+        }
+        .router-tr:hover { background: var(--border-d); }
+        .router-tr.offline { opacity: 0.55; }
+        .router-tr .dot {
+            display: inline-block;
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            background: var(--ok);
+            box-shadow: 0 0 6px var(--ok);
+        }
+        .router-tr.offline .dot {
+            background: var(--err);
+            box-shadow: none;
+        }
+        .router-tr .hostname {
+            font-weight: 600;
+            color: var(--fg);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .router-tr .ip {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: var(--fg-muted);
+        }
+        .router-tr .num {
+            text-align: center;
+            font-variant-numeric: tabular-nums;
+        }
+        .router-tr .b24 { color: var(--accent); }
+        .router-tr .b5  { color: var(--accent-2); }
+        .router-tr .upt { font-size: 11px; color: var(--fg-muted); }
+        .router-tr .ch {
+            color: var(--fg-muted);
+            font-size: 10px;
+            transition: transform 0.15s;
+            justify-self: end;
+        }
+        .router-tr.expanded .ch {
+            transform: rotate(90deg);
+            color: var(--accent);
+        }
+        .router-detail {
+            display: none;
+            padding: 12px 16px;
+            background: var(--card-bg-2);
+            border-bottom: 1px solid var(--border-a);
+        }
+        .router-detail.expanded { display: block; }
     </style>
 </head>
 <body>
@@ -424,8 +506,8 @@
         </div>
     </div>
 
-    <div class="routers-grid" id="routersGrid">
-        <div class="loading">
+    <div class="router-table" id="routersTable">
+        <div class="loading" style="padding:30px">
             <div class="spinner"></div>
             <div>Loading router data...</div>
         </div>
@@ -490,25 +572,47 @@
 
         function toggleRouter(routerIp) {
             const safeIP = routerIp.replace(/\./g, '_');
-            const content = document.getElementById(`router-content-${safeIP}`);
-            const icon = document.getElementById(`router-card-${safeIP}`)?.querySelector('.expand-icon');
-            
-            if (!content) return;
-            
+            const row = document.getElementById(`router-row-${safeIP}`);
+            const detail = document.getElementById(`router-content-${safeIP}`);
+            if (!row || !detail) return;
             if (expandedRouters.has(routerIp)) {
-                // Collapse
                 expandedRouters.delete(routerIp);
-                content.classList.remove('expanded');
-                if (icon) icon.classList.remove('rotated');
+                row.classList.remove('expanded');
+                detail.classList.remove('expanded');
             } else {
-                // Expand
                 expandedRouters.add(routerIp);
-                content.classList.add('expanded');
-                if (icon) icon.classList.add('rotated');
-                
-                // Load data if expanding
+                row.classList.add('expanded');
+                detail.classList.add('expanded');
                 loadRouterDetails(routerIp);
             }
+        }
+
+        function setText(parent, sel, value) {
+            const el = parent.querySelector(sel);
+            if (el && el.textContent !== String(value)) el.textContent = value;
+        }
+
+        function fmtLoad(v) { return (v != null) ? Number(v).toFixed(2) : '—'; }
+        function fmtUptime(s) { return s ? formatTime(s) : '—'; }
+
+        function renderRouterRow(r, safeIP, isExpanded) {
+            const online = r.online === 1;
+            return `
+                <div class="router-tr${online ? '' : ' offline'}${isExpanded ? ' expanded' : ''}"
+                     id="router-row-${safeIP}"
+                     data-router-ip="${r.ip}"
+                     onclick="toggleRouter('${r.ip}')">
+                    <div><span class="dot"></span></div>
+                    <div class="hostname">${r.hostname || r.ip}</div>
+                    <div class="ip">${r.ip}</div>
+                    <div class="num cnt">${r.total_clients || 0}</div>
+                    <div class="num b24">${r.clients_24 || 0}</div>
+                    <div class="num b5">${r.clients_5 || 0}</div>
+                    <div class="num load">${fmtLoad(r.load1)}</div>
+                    <div class="upt">${fmtUptime(r.uptime)}</div>
+                    <div><i class="fas fa-chevron-right ch"></i></div>
+                </div>
+            `;
         }
 
         function renderRouters() {
@@ -516,22 +620,22 @@
                 .then(res => res.json())
                 .then(data => {
                     const routers = data.routers || [];
-                    const grid = document.getElementById('routersGrid');
-                    
+                    const table = document.getElementById('routersTable');
+
                     if (routers.length === 0) {
-                        grid.innerHTML = '<div class="no-clients">No routers configured. Please add routers in Settings.</div>';
+                        table.innerHTML = '<div class="no-clients" style="padding:30px">No routers configured. Please add routers in Settings.</div>';
                         return;
                     }
 
                     // Check if router list actually changed
                     const newRouterIPs = routers.map(r => r.ip).sort().join(',');
                     const oldRouterIPs = Object.keys(currentRouterData).sort().join(',');
-                    
+
                     // Store current data
                     routers.forEach(router => {
                         currentRouterData[router.ip] = router;
                     });
-                    
+
                     // Remove routers that no longer exist
                     Object.keys(currentRouterData).forEach(ip => {
                         if (!routers.find(r => r.ip === ip)) {
@@ -540,82 +644,46 @@
                         }
                     });
 
-                    // Only re-render if router list changed or if it's the first render
-                    if (newRouterIPs !== oldRouterIPs || grid.children.length === 0) {
-                        grid.innerHTML = routers.map(router => {
-                            const isExpanded = expandedRouters.has(router.ip);
-                            const isOnline = router.online === 1;
-                            const safeIP = router.ip.replace(/\./g, '_'); // Replace dots with underscores for safe IDs
-                            
-                            return `
-                                <div class="router-card ${!isOnline ? 'offline' : ''}" id="router-card-${safeIP}" data-router-ip="${router.ip}">
-                                    <div class="router-header" onclick="toggleRouter('${router.ip}')">
-                                        <div class="router-info">
-                                            <div class="router-status ${!isOnline ? 'offline' : ''}"></div>
-                                            <div>
-                                                <div class="router-name">${router.hostname || router.ip}</div>
-                                                <div class="router-ip">${router.ip}</div>
-                                            </div>
-                                        </div>
-                                        <div class="router-stats">
-                                            <div class="router-stat">
-                                                <div class="router-stat-value">${router.num_interfaces || 0}</div>
-                                                <div class="router-stat-label">Interfaces</div>
-                                            </div>
-                                            <div class="router-stat">
-                                                <div class="router-stat-value">${router.total_clients || 0}</div>
-                                                <div class="router-stat-label">Clients</div>
-                                            </div>
-                                            <i class="fas fa-chevron-down expand-icon ${isExpanded ? 'rotated' : ''}" style="color: var(--accent);"></i>
-                                        </div>
-                                    </div>
-                                    <div class="router-content ${isExpanded ? 'expanded' : ''}" id="router-content-${safeIP}">
-                                        <div class="loading">
-                                            <div class="spinner"></div>
-                                            Loading interfaces...
-                                        </div>
-                                    </div>
-                                </div>
-                            `;
-                        }).join('');
-                    } else {
-                        // Just update stats without re-rendering entire structure
+                    // Full structural rebuild only if router set changed or
+                    // we're rendering for the first time. Otherwise patch cells in place.
+                    const hasHeader = table.querySelector('.router-th');
+                    if (newRouterIPs !== oldRouterIPs || !hasHeader) {
+                        let html = `
+                            <div class="router-th">
+                                <div></div>
+                                <div>Hostname</div>
+                                <div>IP</div>
+                                <div class="num">Clients</div>
+                                <div class="num">2.4G</div>
+                                <div class="num">5G</div>
+                                <div class="num">Load</div>
+                                <div>Uptime</div>
+                                <div></div>
+                            </div>
+                        `;
                         routers.forEach(router => {
                             const safeIP = router.ip.replace(/\./g, '_');
-                            const card = document.getElementById(`router-card-${safeIP}`);
-                            if (card) {
-                                const isOnline = router.online === 1;
-                                
-                                // Update card offline class
-                                if (isOnline) {
-                                    card.classList.remove('offline');
-                                } else {
-                                    card.classList.add('offline');
-                                }
-                                
-                                // Update status dot
-                                const status = card.querySelector('.router-status');
-                                if (status) {
-                                    if (isOnline) {
-                                        status.classList.remove('offline');
-                                    } else {
-                                        status.classList.add('offline');
-                                    }
-                                }
-                                
-                                // Update hostname if changed
-                                const nameElem = card.querySelector('.router-name');
-                                if (nameElem) {
-                                    nameElem.textContent = router.hostname || router.ip;
-                                }
-                                
-                                // Update stats
-                                const stats = card.querySelectorAll('.router-stat-value');
-                                if (stats.length >= 2) {
-                                    stats[0].textContent = router.num_interfaces || 0;
-                                    stats[1].textContent = router.total_clients || 0;
-                                }
-                            }
+                            const isExpanded = expandedRouters.has(router.ip);
+                            html += renderRouterRow(router, safeIP, isExpanded);
+                            html += `<div class="router-detail${isExpanded ? ' expanded' : ''}" id="router-content-${safeIP}">
+                                <div class="loading"><div class="spinner"></div>Loading interfaces...</div>
+                            </div>`;
+                        });
+                        table.innerHTML = html;
+                    } else {
+                        routers.forEach(router => {
+                            const safeIP = router.ip.replace(/\./g, '_');
+                            const row = document.getElementById(`router-row-${safeIP}`);
+                            if (!row) return;
+                            const online = router.online === 1;
+                            row.classList.toggle('offline', !online);
+                            setText(row, '.hostname', router.hostname || router.ip);
+                            setText(row, '.ip', router.ip);
+                            setText(row, '.cnt', router.total_clients || 0);
+                            setText(row, '.b24', router.clients_24 || 0);
+                            setText(row, '.b5',  router.clients_5 || 0);
+                            setText(row, '.load', fmtLoad(router.load1));
+                            setText(row, '.upt',  fmtUptime(router.uptime));
                         });
                     }
 

@@ -112,7 +112,25 @@ def config_page():
 def api_routers():
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('SELECT r.*, COUNT(DISTINCT i.interface) as num_interfaces, SUM(i.num_clients) as total_clients FROM routers r LEFT JOIN interfaces i ON r.ip = i.router_ip GROUP BY r.ip')
+    cursor.execute("""
+        SELECT
+            r.*,
+            COUNT(DISTINCT i.interface) AS num_interfaces,
+            COALESCE(SUM(i.num_clients), 0) AS total_clients,
+            COALESCE(SUM(CASE WHEN i.frequency < 3000 THEN i.num_clients ELSE 0 END), 0) AS clients_24,
+            COALESCE(SUM(CASE WHEN i.frequency >= 5000 THEN i.num_clients ELSE 0 END), 0) AS clients_5,
+            sm.uptime, sm.load1, sm.load5, sm.load15,
+            sm.mem_total, sm.mem_used
+        FROM routers r
+        LEFT JOIN interfaces i ON r.ip = i.router_ip
+        LEFT JOIN (
+            SELECT router_ip, uptime, load1, load5, load15, mem_total, mem_used
+            FROM system_metrics
+            WHERE id IN (SELECT MAX(id) FROM system_metrics GROUP BY router_ip)
+        ) sm ON r.ip = sm.router_ip
+        GROUP BY r.ip
+        ORDER BY r.ip
+    """)
     routers = [dict(row) for row in cursor.fetchall()]
     conn.close()
     return jsonify({'success': True, 'routers': routers})
