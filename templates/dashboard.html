@@ -671,6 +671,7 @@
                                             <thead>
                                                 <tr>
                                                     <th>MAC Address</th>
+                                                    <th>IP / Device</th>
                                                     <th>Signal</th>
                                                     <th>RX Rate</th>
                                                     <th>TX Rate</th>
@@ -685,12 +686,20 @@
                                                     .map(client => {
                                                         const signalPercent = getSignalPercent(client.signal);
                                                         const signalClass = getSignalClass(client.signal);
-                                                        
+                                                        const ip = client.arp_ip || '';
+                                                        const hostname = client.arp_hostname || '';
+                                                        const ipCell = ip
+                                                          ? (hostname
+                                                              ? `<div style="font-weight:600">${hostname}</div><div style="color:var(--fg-muted);font-size:0.85em">${ip}</div>`
+                                                              : ip)
+                                                          : '<span style="color:var(--fg-muted)">—</span>';
+
                                                         return `
                                                             <tr>
                                                                 <td class="mac-address" onclick="copyMAC('${client.mac}')" style="cursor: pointer;" title="Click to copy">
                                                                     ${client.mac}
                                                                 </td>
+                                                                <td class="mac-address">${ipCell}</td>
                                                                 <td>
                                                                     <div class="signal-bar">
                                                                         <div class="signal-fill ${signalClass}" style="width: ${signalPercent}%"></div>

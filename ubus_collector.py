@@ -21,6 +21,7 @@ from typing import Optional
 
 import asyncssh
 
+import pfsense
 import retention
 
 
@@ -36,6 +37,9 @@ BACKOFF_MAX = 60
 # so we can poll frequently for the live view without bloating the
 # history tables. Override per-deploy via config['history_interval'].
 HISTORY_INTERVAL_DEFAULT = 60
+# Seconds between pfSense ARP-table pulls. pfSense's ARP cache itself
+# updates much faster than this, so 30s is a fine UX/load compromise.
+PFSENSE_ARP_INTERVAL_DEFAULT = 30
 
 
 logging.basicConfig(
@@ -158,6 +162,21 @@ def init_db():
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_sysmetrics_router_ts ON system_metrics(router_ip, ts)")
+
+    # ---- pfSense ARP cache (P2 #10) ----
+    # MAC is canonicalised to lowercase so JOINs against clients.mac
+    # (which is whatever case the AP reported) work via lower().
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS arp_entries (
+            mac TEXT PRIMARY KEY,
+            ip TEXT,
+            hostname TEXT,
+            interface TEXT,
+            last_seen DATETIME NOT NULL,
+            expires_seconds INTEGER
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_arp_ip ON arp_entries(ip)")
 
     conn.commit()
     conn.close()
@@ -501,6 +520,70 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
     logger.info(f"{router_ip}: stopped")
 
 
+def save_arp_entries(entries: list[dict]):
+    """Upsert one ARP snapshot from pfSense. MAC is the PK (lowercased)."""
+    now = datetime.now().isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        for e in entries:
+            mac = (e.get("mac_address") or "").lower()
+            if not mac:
+                continue
+            hostname = e.get("hostname") or ""
+            # pfSense returns '?' when there is no known hostname.
+            if hostname == "?":
+                hostname = ""
+            cur.execute("""
+                INSERT INTO arp_entries
+                    (mac, ip, hostname, interface, last_seen, expires_seconds)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(mac) DO UPDATE SET
+                    ip = excluded.ip,
+                    hostname = excluded.hostname,
+                    interface = excluded.interface,
+                    last_seen = excluded.last_seen,
+                    expires_seconds = excluded.expires_seconds
+            """, (
+                mac,
+                e.get("ip_address", "") or "",
+                hostname,
+                e.get("interface", "") or "",
+                now,
+                pfsense.parse_expires_seconds(e.get("expires", "")),
+            ))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def arp_loop(shutdown: asyncio.Event):
+    """Pull pfSense ARP table on a fixed interval. Re-reads config each
+    cycle so a UI change to pfsense_url / pfsense_api_key takes effect
+    on the next loop iteration without restarting."""
+    while not shutdown.is_set():
+        cfg = load_config()
+        url = cfg.get("pfsense_url", "")
+        key = cfg.get("pfsense_api_key", "")
+        interval = int(cfg.get("pfsense_arp_interval", PFSENSE_ARP_INTERVAL_DEFAULT))
+        try:
+            if url and key:
+                entries = await pfsense.fetch_arp_table(url, key)
+                if entries:
+                    save_arp_entries(entries)
+                    logger.info(f"pfSense ARP: refreshed {len(entries)} entries")
+            else:
+                # Not configured — sleep longer between checks.
+                interval = max(interval, 300)
+        except Exception as e:
+            logger.error(f"arp_loop error: {e}", exc_info=True)
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=interval)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+
 async def retention_loop(shutdown: asyncio.Event):
     """Daily history cleanup. Re-reads config each cycle for live changes."""
     while not shutdown.is_set():
@@ -541,6 +624,7 @@ async def main():
         for ip in routers
     ]
     tasks.append(asyncio.create_task(retention_loop(shutdown), name="retention"))
+    tasks.append(asyncio.create_task(arp_loop(shutdown), name="pfsense-arp"))
     await shutdown.wait()
     logger.info("Shutdown signaled; cancelling tasks")
     for t in tasks:

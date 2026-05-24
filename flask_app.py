@@ -125,7 +125,13 @@ def api_router_detail(router_ip):
     cursor.execute('SELECT * FROM interfaces WHERE router_ip = ? ORDER BY interface', (router_ip,))
     interfaces = [dict(row) for row in cursor.fetchall()]
     for iface in interfaces:
-        cursor.execute('SELECT * FROM clients WHERE router_ip = ? AND interface = ? ORDER BY signal DESC', (router_ip, iface['interface']))
+        cursor.execute("""
+            SELECT c.*, a.ip AS arp_ip, a.hostname AS arp_hostname
+            FROM clients c
+            LEFT JOIN arp_entries a ON lower(c.mac) = a.mac
+            WHERE c.router_ip = ? AND c.interface = ?
+            ORDER BY c.signal DESC
+        """, (router_ip, iface['interface']))
         iface['clients'] = [dict(row) for row in cursor.fetchall()]
     conn.close()
     return jsonify({'success': True, 'router_ip': router_ip, 'interfaces': interfaces})
@@ -135,7 +141,16 @@ def api_router_detail(router_ip):
 def api_clients():
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute('SELECT c.*, i.ssid, i.frequency FROM clients c LEFT JOIN interfaces i ON c.router_ip = i.router_ip AND c.interface = i.interface ORDER BY c.signal DESC')
+    cursor.execute("""
+        SELECT c.*, i.ssid, i.frequency,
+               a.ip AS arp_ip, a.hostname AS arp_hostname
+        FROM clients c
+        LEFT JOIN interfaces i
+          ON c.router_ip = i.router_ip AND c.interface = i.interface
+        LEFT JOIN arp_entries a
+          ON lower(c.mac) = a.mac
+        ORDER BY c.signal DESC
+    """)
     clients = [dict(row) for row in cursor.fetchall()]
     conn.close()
     return jsonify({'success': True, 'clients': clients, 'total': len(clients)})
