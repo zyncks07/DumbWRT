@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raw Logs - OpenWrt Monitor</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0a0e27;
+            color: #e8eaed;
+            padding: 12px;
+            min-height: 100vh;
+            font-size: 11px;
+        }
+        
+        .header {
+            background: rgba(26, 34, 56, 0.95);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 10px;
+            padding: 12px 20px;
+            margin-bottom: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .header h1 {
+            font-size: 18px;
+            background: linear-gradient(135deg, #00d4ff, #00ff88);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .header-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        
+        .btn {
+            background: rgba(26, 34, 56, 0.95);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            color: #e8eaed;
+            padding: 7px 14px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 11px;
+            transition: all 0.3s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        
+        .btn:hover {
+            background: #00d4ff;
+            border-color: #00d4ff;
+            color: #0a0e27;
+            transform: translateY(-1px);
+        }
+        
+        .controls {
+            background: rgba(26, 34, 56, 0.95);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 10px;
+            padding: 12px 20px;
+            margin-bottom: 12px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .control-label {
+            font-size: 10px;
+            color: #9aa0a6;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        
+        .control-input {
+            background: rgba(10, 14, 39, 0.7);
+            border: 2px solid rgba(0, 212, 255, 0.2);
+            border-radius: 6px;
+            padding: 6px 10px;
+            color: #e8eaed;
+            font-size: 11px;
+            font-family: 'Courier New', monospace;
+            width: 80px;
+        }
+        
+        .control-input:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+        
+        .control-select {
+            background: rgba(10, 14, 39, 0.7);
+            border: 2px solid rgba(0, 212, 255, 0.2);
+            border-radius: 6px;
+            padding: 6px 10px;
+            color: #e8eaed;
+            font-size: 11px;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .control-select:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+        
+        .btn-toggle {
+            background: rgba(0, 212, 255, 0.2);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            color: #00d4ff;
+        }
+        
+        .btn-toggle.active {
+            background: #00d4ff;
+            color: #0a0e27;
+        }
+        
+        .btn-clear {
+            background: rgba(255, 71, 87, 0.2);
+            border: 1px solid rgba(255, 71, 87, 0.3);
+            color: #ff4757;
+        }
+        
+        .btn-clear:hover {
+            background: #ff4757;
+            color: #0a0e27;
+        }
+        
+        .status-bar {
+            background: rgba(26, 34, 56, 0.95);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 10px;
+            padding: 8px 20px;
+            margin-bottom: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 10px;
+            color: #9aa0a6;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #00ff88;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .tabs {
+            background: rgba(26, 34, 56, 0.95);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 10px 10px 0 0;
+            padding: 8px 20px;
+            display: flex;
+            gap: 8px;
+        }
+        
+        .tab {
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 11px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: rgba(10, 14, 39, 0.5);
+            color: #9aa0a6;
+        }
+        
+        .tab:hover {
+            background: rgba(0, 212, 255, 0.1);
+            color: #00d4ff;
+        }
+        
+        .tab.active {
+            background: rgba(0, 212, 255, 0.2);
+            color: #00d4ff;
+            border: 1px solid rgba(0, 212, 255, 0.3);
+        }
+        
+        .log-container {
+            background: #0a0e27;
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-top: none;
+            border-radius: 0 0 10px 10px;
+            padding: 15px;
+            height: calc(100vh - 250px);
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            line-height: 1.6;
+        }
+        
+        .log-entry {
+            padding: 2px 6px;
+            border-left: 2px solid transparent;
+            margin-bottom: 1px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-size: 10px;
+            line-height: 1.4;
+        }
+        
+        .log-entry:hover {
+            background: rgba(0, 212, 255, 0.05);
+        }
+        
+        .log-entry.error {
+            border-left-color: #ff4757;
+            color: #ff9999;
+        }
+        
+        .log-entry.warning {
+            border-left-color: #ffb800;
+            color: #ffd966;
+        }
+        
+        .log-entry.info {
+            border-left-color: #00d4ff;
+            color: #b3e5fc;
+        }
+        
+        .log-entry.success {
+            border-left-color: #00ff88;
+            color: #b3ffcc;
+        }
+        
+        .log-timestamp {
+            color: #9aa0a6;
+            margin-right: 6px;
+            font-size: 9px;
+        }
+        
+        .log-level {
+            color: #00d4ff;
+            margin-right: 6px;
+            font-weight: bold;
+            font-size: 9px;
+        }
+        
+        .log-router {
+            color: #00ff88;
+            margin-right: 6px;
+            font-size: 9px;
+        }
+        
+        .log-entry.header {
+            border-left-color: #00d4ff;
+            color: #00d4ff;
+            font-weight: bold;
+            background: rgba(0, 212, 255, 0.05);
+        }
+        
+        .raw-json {
+            background: rgba(10, 14, 39, 0.7);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 6px;
+            padding: 8px;
+            margin: 4px 0;
+            overflow-x: auto;
+            font-size: 9px;
+            line-height: 1.3;
+        }
+        
+        .json-key {
+            color: #00d4ff;
+        }
+        
+        .json-string {
+            color: #00ff88;
+        }
+        
+        .json-number {
+            color: #ffb800;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #9aa0a6;
+        }
+        
+        .spinner {
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-top: 3px solid #00d4ff;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>
+            <i class="fas fa-terminal"></i>
+            Raw Logs Viewer
+        </h1>
+        <div class="header-actions">
+            <a href="/dashboard" class="btn">
+                <i class="fas fa-arrow-left"></i>
+                Dashboard
+            </a>
+            <a href="/config" class="btn">
+                <i class="fas fa-cog"></i>
+                Settings
+            </a>
+        </div>
+    </div>
+
+    <div class="controls">
+        <div class="control-group">
+            <span class="control-label">Refresh Rate:</span>
+            <input type="number" class="control-input" id="refreshRate" value="5" min="1" max="60">
+            <span class="control-label">seconds</span>
+        </div>
+        
+        <div class="control-group">
+            <span class="control-label">Router:</span>
+            <select class="control-select" id="routerSelect">
+                <option value="collector">Collector Logs</option>
+            </select>
+        </div>
+        
+        <div class="control-group">
+            <button class="btn btn-toggle" id="autoScrollBtn" onclick="toggleAutoScroll()">
+                <i class="fas fa-arrow-down"></i>
+                Auto-scroll
+            </button>
+        </div>
+        
+        <div class="control-group">
+            <button class="btn btn-clear" onclick="clearLogs()">
+                <i class="fas fa-trash"></i>
+                Clear
+            </button>
+        </div>
+    </div>
+
+    <div class="status-bar">
+        <div class="status-item">
+            <span class="status-dot"></span>
+            <span>Live monitoring active</span>
+        </div>
+        <div class="status-item">
+            <span>Last update: <span id="lastUpdate">Never</span></span>
+        </div>
+        <div class="status-item">
+            <span>Log entries: <span id="logCount">0</span></span>
+        </div>
+    </div>
+
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab('formatted')" id="tab-formatted">
+            <i class="fas fa-align-left"></i> Formatted
+        </div>
+        <div class="tab" onclick="switchTab('raw')" id="tab-raw">
+            <i class="fas fa-code"></i> Raw JSON
+        </div>
+    </div>
+
+    <div class="log-container" id="logContainer">
+        <div class="loading">
+            <div class="spinner"></div>
+            <div>Loading logs...</div>
+        </div>
+    </div>
+
+    <script>
+        let autoScroll = true;
+        let refreshInterval = null;
+        let currentTab = 'formatted';
+        let currentLogs = [];
+
+        function toggleAutoScroll() {
+            autoScroll = !autoScroll;
+            const btn = document.getElementById('autoScrollBtn');
+            btn.classList.toggle('active', autoScroll);
+        }
+
+        function clearLogs() {
+            currentLogs = [];
+            document.getElementById('logContainer').innerHTML = '<div class="log-entry info">Logs cleared. Waiting for new entries...</div>';
+            document.getElementById('logCount').textContent = '0';
+        }
+
+        function switchTab(tab) {
+            currentTab = tab;
+            document.getElementById('tab-formatted').classList.toggle('active', tab === 'formatted');
+            document.getElementById('tab-raw').classList.toggle('active', tab === 'raw');
+            renderLogs();
+        }
+
+        function formatLogEntry(line) {
+            // Check if it's a router raw data header/separator
+            if (line.startsWith('===') || line.startsWith('---')) {
+                return { timestamp: '', level: 'info', router: '', message: line, isHeader: true };
+            }
+            
+            // Check if it's a plain timestamp line
+            if (line.startsWith('Timestamp:')) {
+                return { timestamp: '', level: 'success', router: '', message: line };
+            }
+            
+            // Parse systemd journal format: TIMESTAMP HOSTNAME PROCESS[PID]: MESSAGE
+            const parts = line.match(/^(\S+\s+\S+)\s+\S+\s+\S+\[(\d+)\]:\s+(.+)$/);
+            
+            if (!parts) {
+                return { timestamp: '', level: 'info', router: '', message: line };
+            }
+            
+            const [, timestamp, pid, message] = parts;
+            
+            // Determine log level from message
+            let level = 'info';
+            if (message.includes('ERROR') || message.includes('error')) level = 'error';
+            else if (message.includes('WARNING') || message.includes('warning')) level = 'warning';
+            else if (message.includes('✅') || message.includes('SUCCESS')) level = 'success';
+            
+            // Extract router IP if present
+            const routerMatch = message.match(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/);
+            const router = routerMatch ? routerMatch[0] : '';
+            
+            return { timestamp, level, router, message };
+        }
+
+        function renderLogs() {
+            const container = document.getElementById('logContainer');
+            
+            if (currentLogs.length === 0) {
+                container.innerHTML = '<div class="log-entry info">No logs yet. Waiting for data...</div>';
+                return;
+            }
+            
+            if (currentTab === 'formatted') {
+                container.innerHTML = currentLogs.map(line => {
+                    const entry = formatLogEntry(line);
+                    const headerClass = entry.isHeader ? ' header' : '';
+                    return `
+                        <div class="log-entry ${entry.level}${headerClass}">
+                            ${entry.timestamp ? `<span class="log-timestamp">${entry.timestamp}</span>` : ''}
+                            ${entry.router ? `<span class="log-router">[${entry.router}]</span>` : ''}
+                            <span>${entry.message}</span>
+                        </div>
+                    `;
+                }).join('');
+            } else {
+                // Raw view - format JSON nicely for router data
+                const isRouterData = currentLogs.some(line => line.includes('=== Raw ubus'));
+                if (isRouterData) {
+                    // Pretty print JSON sections
+                    let formatted = '';
+                    let inJson = false;
+                    let jsonBuffer = '';
+                    
+                    currentLogs.forEach(line => {
+                        if (line.startsWith('===') || line.startsWith('---') || line.startsWith('Timestamp:')) {
+                            if (inJson && jsonBuffer) {
+                                try {
+                                    const obj = JSON.parse(jsonBuffer);
+                                    formatted += `<div class="raw-json">${JSON.stringify(obj, null, 2)}</div>`;
+                                } catch {
+                                    formatted += `<div class="raw-json">${jsonBuffer}</div>`;
+                                }
+                                jsonBuffer = '';
+                                inJson = false;
+                            }
+                            formatted += `<div style="color: #00d4ff; font-weight: bold; margin-top: 8px;">${line}</div>`;
+                        } else if (line.trim().startsWith('{')) {
+                            inJson = true;
+                            jsonBuffer = line;
+                        } else if (inJson) {
+                            jsonBuffer += '\n' + line;
+                            if (line.trim() === '}') {
+                                try {
+                                    const obj = JSON.parse(jsonBuffer);
+                                    formatted += `<div class="raw-json">${JSON.stringify(obj, null, 2)}</div>`;
+                                } catch {
+                                    formatted += `<div class="raw-json">${jsonBuffer}</div>`;
+                                }
+                                jsonBuffer = '';
+                                inJson = false;
+                            }
+                        } else {
+                            formatted += `<div>${line}</div>`;
+                        }
+                    });
+                    
+                    container.innerHTML = formatted;
+                } else {
+                    // Regular logs - just show as-is
+                    container.innerHTML = `<div class="raw-json">${currentLogs.join('\n')}</div>`;
+                }
+            }
+            
+            if (autoScroll) {
+                container.scrollTop = container.scrollHeight;
+            }
+        }
+
+        async function loadRouters() {
+            try {
+                const res = await fetch('/api/config');
+                const data = await res.json();
+                const routers = data.config.routers || [];
+                
+                const select = document.getElementById('routerSelect');
+                select.innerHTML = '<option value="collector">Collector Logs</option>';
+                
+                routers.forEach(router => {
+                    const option = document.createElement('option');
+                    option.value = router;
+                    option.textContent = `Router: ${router}`;
+                    select.appendChild(option);
+                });
+            } catch (error) {
+                console.error('Error loading routers:', error);
+            }
+        }
+
+        async function fetchLogs() {
+            try {
+                const selectedRouter = document.getElementById('routerSelect').value;
+                
+                if (selectedRouter === 'collector') {
+                    // Fetch collector logs
+                    const res = await fetch('/api/raw-logs');
+                    const data = await res.json();
+                    
+                    if (data.success && data.logs) {
+                        currentLogs = data.logs;
+                        renderLogs();
+                        document.getElementById('logCount').textContent = currentLogs.length;
+                        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+                    }
+                } else {
+                    // Fetch router-specific raw data
+                    const res = await fetch(`/api/router-raw-data/${selectedRouter}`);
+                    const data = await res.json();
+                    
+                    if (data.success && data.data) {
+                        const raw = data.data;
+                        const formattedLines = [];
+                        
+                        formattedLines.push(`=== Raw ubus data from ${raw.router_ip} ===`);
+                        formattedLines.push(`Timestamp: ${raw.timestamp}`);
+                        formattedLines.push('');
+                        formattedLines.push('--- Devices List ---');
+                        formattedLines.push(raw.devices_raw);
+                        formattedLines.push('');
+                        
+                        raw.interfaces.forEach(iface => {
+                            formattedLines.push(`--- Interface: ${iface.device} ---`);
+                            formattedLines.push('Info:');
+                            formattedLines.push(iface.info_raw);
+                            formattedLines.push('');
+                            formattedLines.push('Clients:');
+                            formattedLines.push(iface.clients_raw);
+                            formattedLines.push('');
+                        });
+                        
+                        currentLogs = formattedLines;
+                        renderLogs();
+                        document.getElementById('logCount').textContent = currentLogs.length;
+                        document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+                    }
+                }
+            } catch (error) {
+                console.error('Error fetching logs:', error);
+            }
+        }
+
+        function startAutoRefresh() {
+            if (refreshInterval) {
+                clearInterval(refreshInterval);
+            }
+            
+            const rate = parseInt(document.getElementById('refreshRate').value) * 1000;
+            fetchLogs(); // Immediate fetch
+            refreshInterval = setInterval(fetchLogs, rate);
+        }
+
+        // Handle refresh rate change
+        document.getElementById('refreshRate').addEventListener('change', startAutoRefresh);
+        document.getElementById('routerSelect').addEventListener('change', () => {
+            clearLogs();
+            fetchLogs();
+        });
+
+        // Initial load
+        loadRouters();
+        startAutoRefresh();
+    </script>
+</body>
+</html>

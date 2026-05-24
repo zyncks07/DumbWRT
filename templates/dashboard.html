@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenWrt Monitor Dashboard</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0a0e27 0%, #0d1117 100%);
+            color: #e8eaed;
+            min-height: 100vh;
+            padding: 12px;
+            font-size: 12px;
+        }
+        
+        .header {
+            background: rgba(26, 34, 56, 0.95);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 10px;
+            padding: 12px 20px;
+            margin-bottom: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .header h1 {
+            font-size: 18px;
+            background: linear-gradient(135deg, #00d4ff, #00ff88);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .header-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        
+        .last-update {
+            font-size: 10px;
+            color: #9aa0a6;
+            margin-right: 12px;
+        }
+        
+        .btn {
+            background: rgba(26, 34, 56, 0.95);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            color: #e8eaed;
+            padding: 7px 14px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 11px;
+            transition: all 0.3s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+        }
+        
+        .btn:hover {
+            background: #00d4ff;
+            border-color: #00d4ff;
+            color: #0a0e27;
+            transform: translateY(-1px);
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        
+        .stat-card {
+            background: rgba(26, 34, 56, 0.95);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 8px;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        
+        .stat-label {
+            font-size: 9px;
+            color: #9aa0a6;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+        
+        .stat-value {
+            font-size: 24px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #00d4ff, #00ff88);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .stat-icon {
+            font-size: 16px;
+            opacity: 0.3;
+        }
+        
+        .routers-grid {
+            display: grid;
+            gap: 10px;
+        }
+        
+        .router-card {
+            background: rgba(26, 34, 56, 0.95);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 8px;
+            overflow: hidden;
+            transition: all 0.3s;
+        }
+        
+        .router-card.offline {
+            opacity: 0.5;
+            border-color: rgba(255, 71, 87, 0.3);
+        }
+        
+        .router-header {
+            padding: 12px 16px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.3s;
+        }
+        
+        .router-header:hover {
+            background: rgba(0, 212, 255, 0.05);
+        }
+        
+        .router-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .router-status {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #00ff88;
+            box-shadow: 0 0 8px rgba(0, 255, 136, 0.5);
+            animation: pulse 2s infinite;
+        }
+        
+        .router-status.offline {
+            background: #ff4757;
+            box-shadow: 0 0 8px rgba(255, 71, 87, 0.5);
+            animation: none;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .router-name {
+            font-size: 14px;
+            font-weight: 600;
+            color: #00d4ff;
+        }
+        
+        .router-ip {
+            font-size: 10px;
+            color: #9aa0a6;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .router-stats {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+        }
+        
+        .router-stat {
+            text-align: center;
+        }
+        
+        .router-stat-value {
+            font-size: 16px;
+            font-weight: 700;
+            color: #00d4ff;
+        }
+        
+        .router-stat-label {
+            font-size: 8px;
+            color: #9aa0a6;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .router-content {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.3s ease-out;
+        }
+        
+        .router-content.expanded {
+            max-height: 2000px;
+        }
+        
+        .interfaces-list {
+            padding: 0 16px 12px;
+        }
+        
+        .interface-card {
+            background: rgba(10, 14, 39, 0.7);
+            border: 1px solid rgba(0, 212, 255, 0.1);
+            border-radius: 6px;
+            padding: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .interface-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        
+        .interface-name {
+            font-size: 11px;
+            font-weight: 600;
+            color: #00ff88;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .interface-ssid {
+            font-size: 12px;
+            font-weight: 600;
+            color: #e8eaed;
+        }
+        
+        .interface-meta {
+            display: flex;
+            gap: 12px;
+            font-size: 10px;
+            color: #9aa0a6;
+            margin-bottom: 10px;
+        }
+        
+        .clients-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 10px;
+        }
+        
+        .clients-table th {
+            text-align: left;
+            padding: 6px;
+            background: rgba(0, 212, 255, 0.1);
+            color: #9aa0a6;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-size: 9px;
+        }
+        
+        .clients-table td {
+            padding: 8px 6px;
+            border-top: 1px solid rgba(0, 212, 255, 0.1);
+        }
+        
+        .clients-table tr:hover {
+            background: rgba(0, 212, 255, 0.05);
+        }
+        
+        .mac-address {
+            font-family: 'Courier New', monospace;
+            color: #00d4ff;
+            font-size: 10px;
+        }
+        
+        .signal-bar {
+            display: inline-block;
+            width: 50px;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+            vertical-align: middle;
+            margin-right: 6px;
+        }
+        
+        .signal-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: all 0.3s;
+        }
+        
+        .signal-excellent { background: linear-gradient(90deg, #00ff88, #00d4ff); }
+        .signal-good { background: linear-gradient(90deg, #ffd93d, #00ff88); }
+        .signal-fair { background: linear-gradient(90deg, #ffb830, #ffd93d); }
+        .signal-poor { background: linear-gradient(90deg, #ff4757, #ffb830); }
+        
+        .rate {
+            font-family: 'Courier New', monospace;
+            color: #e8eaed;
+        }
+        
+        .no-clients {
+            text-align: center;
+            padding: 20px;
+            color: #9aa0a6;
+            font-size: 11px;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #9aa0a6;
+        }
+        
+        .spinner {
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-top: 3px solid #00d4ff;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .expand-icon {
+            transition: transform 0.3s;
+            font-size: 12px;
+        }
+        
+        .expand-icon.rotated {
+            transform: rotate(180deg);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>
+            <i class="fas fa-network-wired"></i>
+            OpenWrt Monitor
+        </h1>
+        <div class="header-actions">
+            <div class="last-update" id="lastUpdate">Last update: Never</div>
+            <a href="/logs" class="btn">
+                <i class="fas fa-terminal"></i>
+                Logs
+            </a>
+            <a href="/config" class="btn">
+                <i class="fas fa-cog"></i>
+                Settings
+            </a>
+            <a href="/logout" class="btn">
+                <i class="fas fa-sign-out-alt"></i>
+                Logout
+            </a>
+        </div>
+    </div>
+
+    <div class="stats-grid" id="statsGrid">
+        <div class="stat-card">
+            <div class="stat-label">
+                <i class="fas fa-router stat-icon"></i>
+                Total Routers
+            </div>
+            <div class="stat-value" id="totalRouters">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">
+                <i class="fas fa-check-circle stat-icon"></i>
+                Online Routers
+            </div>
+            <div class="stat-value" id="onlineRouters">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">
+                <i class="fas fa-wifi stat-icon"></i>
+                Total Interfaces
+            </div>
+            <div class="stat-value" id="totalInterfaces">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">
+                <i class="fas fa-users stat-icon"></i>
+                Total Clients
+            </div>
+            <div class="stat-value" id="totalClients">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">
+                <i class="fas fa-signal stat-icon"></i>
+                2.4GHz Clients
+            </div>
+            <div class="stat-value" id="clients24">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">
+                <i class="fas fa-signal stat-icon"></i>
+                5GHz Clients
+            </div>
+            <div class="stat-value" id="clients5">0</div>
+        </div>
+    </div>
+
+    <div class="routers-grid" id="routersGrid">
+        <div class="loading">
+            <div class="spinner"></div>
+            <div>Loading router data...</div>
+        </div>
+    </div>
+
+    <script>
+        let expandedRouters = new Set();
+        let currentRouterData = {}; // Cache to prevent unnecessary re-renders
+
+        function getSignalClass(signal) {
+            if (signal >= -50) return 'signal-excellent';
+            if (signal >= -60) return 'signal-good';
+            if (signal >= -70) return 'signal-fair';
+            return 'signal-poor';
+        }
+
+        function getSignalPercent(signal) {
+            const percent = Math.max(0, Math.min(100, ((signal + 90) / 60) * 100));
+            return percent;
+        }
+
+        function formatRate(rate) {
+            if (!rate || rate === 0) return '-';
+            if (rate >= 1000) return (rate / 1000).toFixed(1) + ' Gbps';
+            return rate + ' Mbps';
+        }
+
+        function formatBytes(bytes) {
+            if (!bytes || bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+
+        function formatTime(seconds) {
+            if (!seconds) return '0s';
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = seconds % 60;
+            if (h > 0) return `${h}h ${m}m`;
+            if (m > 0) return `${m}m ${s}s`;
+            return `${s}s`;
+        }
+
+        async function copyMAC(mac) {
+            try {
+                await navigator.clipboard.writeText(mac);
+                // Visual feedback
+                const element = event.target;
+                const originalText = element.textContent;
+                element.textContent = '✓ Copied!';
+                element.style.color = '#00ff88';
+                setTimeout(() => {
+                    element.textContent = originalText;
+                    element.style.color = '#00d4ff';
+                }, 1000);
+            } catch (error) {
+                console.error('Error copying MAC:', error);
+            }
+        }
+
+        function toggleRouter(routerIp) {
+            const safeIP = routerIp.replace(/\./g, '_');
+            const content = document.getElementById(`router-content-${safeIP}`);
+            const icon = document.getElementById(`router-card-${safeIP}`)?.querySelector('.expand-icon');
+            
+            if (!content) return;
+            
+            if (expandedRouters.has(routerIp)) {
+                // Collapse
+                expandedRouters.delete(routerIp);
+                content.classList.remove('expanded');
+                if (icon) icon.classList.remove('rotated');
+            } else {
+                // Expand
+                expandedRouters.add(routerIp);
+                content.classList.add('expanded');
+                if (icon) icon.classList.add('rotated');
+                
+                // Load data if expanding
+                loadRouterDetails(routerIp);
+            }
+        }
+
+        function renderRouters() {
+            fetch('/api/routers')
+                .then(res => res.json())
+                .then(data => {
+                    const routers = data.routers || [];
+                    const grid = document.getElementById('routersGrid');
+                    
+                    if (routers.length === 0) {
+                        grid.innerHTML = '<div class="no-clients">No routers configured. Please add routers in Settings.</div>';
+                        return;
+                    }
+
+                    // Check if router list actually changed
+                    const newRouterIPs = routers.map(r => r.ip).sort().join(',');
+                    const oldRouterIPs = Object.keys(currentRouterData).sort().join(',');
+                    
+                    // Store current data
+                    routers.forEach(router => {
+                        currentRouterData[router.ip] = router;
+                    });
+                    
+                    // Remove routers that no longer exist
+                    Object.keys(currentRouterData).forEach(ip => {
+                        if (!routers.find(r => r.ip === ip)) {
+                            delete currentRouterData[ip];
+                            expandedRouters.delete(ip);
+                        }
+                    });
+
+                    // Only re-render if router list changed or if it's the first render
+                    if (newRouterIPs !== oldRouterIPs || grid.children.length === 0) {
+                        grid.innerHTML = routers.map(router => {
+                            const isExpanded = expandedRouters.has(router.ip);
+                            const isOnline = router.online === 1;
+                            const safeIP = router.ip.replace(/\./g, '_'); // Replace dots with underscores for safe IDs
+                            
+                            return `
+                                <div class="router-card ${!isOnline ? 'offline' : ''}" id="router-card-${safeIP}" data-router-ip="${router.ip}">
+                                    <div class="router-header" onclick="toggleRouter('${router.ip}')">
+                                        <div class="router-info">
+                                            <div class="router-status ${!isOnline ? 'offline' : ''}"></div>
+                                            <div>
+                                                <div class="router-name">${router.hostname || router.ip}</div>
+                                                <div class="router-ip">${router.ip}</div>
+                                            </div>
+                                        </div>
+                                        <div class="router-stats">
+                                            <div class="router-stat">
+                                                <div class="router-stat-value">${router.num_interfaces || 0}</div>
+                                                <div class="router-stat-label">Interfaces</div>
+                                            </div>
+                                            <div class="router-stat">
+                                                <div class="router-stat-value">${router.total_clients || 0}</div>
+                                                <div class="router-stat-label">Clients</div>
+                                            </div>
+                                            <i class="fas fa-chevron-down expand-icon ${isExpanded ? 'rotated' : ''}" style="color: #00d4ff;"></i>
+                                        </div>
+                                    </div>
+                                    <div class="router-content ${isExpanded ? 'expanded' : ''}" id="router-content-${safeIP}">
+                                        <div class="loading">
+                                            <div class="spinner"></div>
+                                            Loading interfaces...
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        }).join('');
+                    } else {
+                        // Just update stats without re-rendering entire structure
+                        routers.forEach(router => {
+                            const safeIP = router.ip.replace(/\./g, '_');
+                            const card = document.getElementById(`router-card-${safeIP}`);
+                            if (card) {
+                                const isOnline = router.online === 1;
+                                
+                                // Update card offline class
+                                if (isOnline) {
+                                    card.classList.remove('offline');
+                                } else {
+                                    card.classList.add('offline');
+                                }
+                                
+                                // Update status dot
+                                const status = card.querySelector('.router-status');
+                                if (status) {
+                                    if (isOnline) {
+                                        status.classList.remove('offline');
+                                    } else {
+                                        status.classList.add('offline');
+                                    }
+                                }
+                                
+                                // Update hostname if changed
+                                const nameElem = card.querySelector('.router-name');
+                                if (nameElem) {
+                                    nameElem.textContent = router.hostname || router.ip;
+                                }
+                                
+                                // Update stats
+                                const stats = card.querySelectorAll('.router-stat-value');
+                                if (stats.length >= 2) {
+                                    stats[0].textContent = router.num_interfaces || 0;
+                                    stats[1].textContent = router.total_clients || 0;
+                                }
+                            }
+                        });
+                    }
+
+                    // Load interface details for expanded routers
+                    routers.forEach(router => {
+                        if (expandedRouters.has(router.ip)) {
+                            loadRouterDetails(router.ip);
+                        }
+                    });
+                })
+                .catch(err => {
+                    console.error('Error fetching routers:', err);
+                });
+        }
+
+        function loadRouterDetails(routerIp) {
+            const safeIP = routerIp.replace(/\./g, '_');
+            
+            fetch(`/api/router/${routerIp}`)
+                .then(res => res.json())
+                .then(data => {
+                    const interfaces = data.interfaces || [];
+                    const container = document.getElementById(`router-content-${safeIP}`);
+                    
+                    if (!container) return; // Router was removed
+                    
+                    if (interfaces.length === 0) {
+                        container.innerHTML = '<div class="no-clients">No wireless interfaces found</div>';
+                        return;
+                    }
+
+                    container.innerHTML = `
+                        <div class="interfaces-list">
+                            ${interfaces.map(iface => `
+                                <div class="interface-card">
+                                    <div class="interface-header">
+                                        <div>
+                                            <div class="interface-ssid">${iface.ssid || 'Hidden SSID'}</div>
+                                            <div class="interface-name">${iface.interface}</div>
+                                        </div>
+                                        <div style="text-align: right; font-size: 11px; color: #9aa0a6;">
+                                            <div><strong>${iface.num_clients || 0}</strong> clients</div>
+                                        </div>
+                                    </div>
+                                    <div class="interface-meta">
+                                        <span><i class="fas fa-signal"></i> ${iface.frequency ? (iface.frequency / 1000).toFixed(1) + ' GHz' : 'N/A'}</span>
+                                        <span><i class="fas fa-arrows-alt-h"></i> ${iface.bandwidth || 'N/A'} MHz</span>
+                                        <span><i class="fas fa-broadcast-tower"></i> Ch ${iface.channel || 'N/A'}</span>
+                                        <span><i class="fas fa-lock"></i> ${iface.encryption || 'Open'}</span>
+                                    </div>
+                                    ${(iface.clients && iface.clients.length > 0) ? `
+                                        <table class="clients-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>MAC Address</th>
+                                                    <th>Signal</th>
+                                                    <th>RX Rate</th>
+                                                    <th>TX Rate</th>
+                                                    <th>RX/TX Data</th>
+                                                    <th>Connected</th>
+                                                    <th>Inactive</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                ${iface.clients
+                                                    .sort((a, b) => a.mac.localeCompare(b.mac)) // Sort by MAC to prevent jumping
+                                                    .map(client => {
+                                                        const signalPercent = getSignalPercent(client.signal);
+                                                        const signalClass = getSignalClass(client.signal);
+                                                        
+                                                        return `
+                                                            <tr>
+                                                                <td class="mac-address" onclick="copyMAC('${client.mac}')" style="cursor: pointer;" title="Click to copy">
+                                                                    ${client.mac}
+                                                                </td>
+                                                                <td>
+                                                                    <div class="signal-bar">
+                                                                        <div class="signal-fill ${signalClass}" style="width: ${signalPercent}%"></div>
+                                                                    </div>
+                                                                    ${client.signal} dBm
+                                                                </td>
+                                                                <td class="rate">${formatRate(client.rx_rate)}</td>
+                                                                <td class="rate">${formatRate(client.tx_rate)}</td>
+                                                                <td class="rate">${formatBytes(client.rx_bytes)} / ${formatBytes(client.tx_bytes)}</td>
+                                                                <td>${formatTime(client.connected_time)}</td>
+                                                                <td>${client.inactive ? client.inactive + 's' : 'Active'}</td>
+                                                            </tr>
+                                                        `;
+                                                    }).join('')}
+                                            </tbody>
+                                        </table>
+                                    ` : '<div class="no-clients">No clients connected</div>'}
+                                </div>
+                            `).join('')}
+                        </div>
+                    `;
+                })
+                .catch(err => {
+                    console.error(`Error fetching details for ${routerIp}:`, err);
+                    const safeIP = routerIp.replace(/\./g, '_');
+                    const container = document.getElementById(`router-content-${safeIP}`);
+                    if (container) {
+                        container.innerHTML = '<div class="no-clients">Error loading interface data</div>';
+                    }
+                });
+        }
+
+        function updateStats() {
+            fetch('/api/stats')
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById('totalRouters').textContent = data.routers.total || 0;
+                    document.getElementById('onlineRouters').textContent = data.routers.online || 0;
+                    document.getElementById('totalInterfaces').textContent = data.total_interfaces || 0;
+                    document.getElementById('totalClients').textContent = data.clients_total || 0;
+                    document.getElementById('clients24').textContent = data.clients_by_band['2.4GHz'] || 0;
+                    document.getElementById('clients5').textContent = data.clients_by_band['5GHz'] || 0;
+                    
+                    const now = new Date();
+                    document.getElementById('lastUpdate').textContent = 
+                        `Last update: ${now.toLocaleTimeString()}`;
+                })
+                .catch(err => console.error('Error fetching stats:', err));
+        }
+
+        // Initial load
+        renderRouters();
+        updateStats();
+
+        // Auto-refresh every 10 seconds
+        setInterval(() => {
+            renderRouters();
+            updateStats();
+        }, 10000);
+    </script>
+</body>
+</html>

@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings - OpenWrt Monitor</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0a0e27 0%, #0d1117 100%);
+            color: #e8eaed;
+            padding: 15px;
+            min-height: 100vh;
+            font-size: 13px;
+        }
+        
+        .container {
+            max-width: 1800px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            background: rgba(26, 34, 56, 0.95);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 10px;
+            padding: 15px 25px;
+            margin-bottom: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .header h1 {
+            font-size: 20px;
+            background: linear-gradient(135deg, #00d4ff, #00ff88);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .btn {
+            background: rgba(26, 34, 56, 0.95);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            color: #e8eaed;
+            padding: 8px 16px;
+            border-radius: 6px;
+            text-decoration: none;
+            font-size: 12px;
+            transition: all 0.3s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+        }
+        
+        .btn:hover {
+            background: #00d4ff;
+            border-color: #00d4ff;
+            color: #0a0e27;
+            transform: translateY(-1px);
+        }
+        
+        .settings-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+        
+        @media (max-width: 1400px) {
+            .settings-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .card {
+            background: rgba(26, 34, 56, 0.95);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 10px;
+            padding: 20px;
+        }
+        
+        .card-title {
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #00d4ff;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(0, 212, 255, 0.1);
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        .form-label {
+            display: block;
+            font-size: 11px;
+            font-weight: 600;
+            color: #9aa0a6;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .form-input {
+            width: 100%;
+            background: rgba(10, 14, 39, 0.7);
+            border: 2px solid rgba(0, 212, 255, 0.2);
+            border-radius: 6px;
+            padding: 10px 12px;
+            color: #e8eaed;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+            transition: all 0.3s;
+        }
+        
+        .form-input:focus {
+            outline: none;
+            border-color: #00d4ff;
+            background: rgba(10, 14, 39, 0.9);
+            box-shadow: 0 0 0 3px rgba(0, 212, 255, 0.1);
+        }
+        
+        .form-input:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .input-group {
+            display: flex;
+            gap: 8px;
+        }
+        
+        .input-group .form-input {
+            flex: 1;
+        }
+        
+        .btn-icon {
+            padding: 10px 14px;
+            min-width: auto;
+        }
+        
+        .router-list {
+            max-height: 400px;
+            overflow-y: auto;
+            margin-top: 10px;
+        }
+        
+        .router-item {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 8px;
+            align-items: center;
+        }
+        
+        .router-input {
+            flex: 1;
+        }
+        
+        .btn-remove {
+            background: rgba(255, 71, 87, 0.2);
+            border: 1px solid rgba(255, 71, 87, 0.3);
+            color: #ff4757;
+            padding: 10px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.3s;
+            white-space: nowrap;
+            font-size: 11px;
+        }
+        
+        .btn-remove:hover {
+            background: #ff4757;
+            color: #0a0e27;
+        }
+        
+        .btn-add {
+            background: rgba(0, 255, 136, 0.2);
+            border: 1px solid rgba(0, 255, 136, 0.3);
+            color: #00ff88;
+            padding: 10px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            margin-top: 10px;
+            transition: all 0.3s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+        }
+        
+        .btn-add:hover {
+            background: #00ff88;
+            color: #0a0e27;
+        }
+        
+        .btn-generate {
+            background: rgba(255, 184, 0, 0.2);
+            border: 1px solid rgba(255, 184, 0, 0.3);
+            color: #ffb800;
+            padding: 10px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 11px;
+        }
+        
+        .btn-generate:hover {
+            background: #ffb800;
+            color: #0a0e27;
+        }
+        
+        .btn-copy {
+            background: rgba(0, 212, 255, 0.2);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            color: #00d4ff;
+        }
+        
+        .btn-copy:hover {
+            background: #00d4ff;
+            color: #0a0e27;
+        }
+        
+        .actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        
+        .btn-save {
+            flex: 1;
+            background: linear-gradient(135deg, #00d4ff, #00ff88);
+            border: none;
+            color: #0a0e27;
+            padding: 14px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .btn-save:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 212, 255, 0.4);
+        }
+        
+        .btn-save:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .alert {
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin-top: 15px;
+            display: none;
+            animation: slideIn 0.3s;
+            font-size: 12px;
+        }
+        
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .alert-success {
+            background: rgba(0, 255, 136, 0.2);
+            border: 1px solid rgba(0, 255, 136, 0.3);
+            color: #00ff88;
+        }
+        
+        .alert-error {
+            background: rgba(255, 71, 87, 0.2);
+            border: 1px solid rgba(255, 71, 87, 0.3);
+            color: #ff4757;
+        }
+        
+        .alert-warning {
+            background: rgba(255, 184, 0, 0.2);
+            border: 1px solid rgba(255, 184, 0, 0.3);
+            color: #ffb800;
+        }
+        
+        .help-text {
+            font-size: 10px;
+            color: #5a6270;
+            margin-top: 4px;
+            line-height: 1.4;
+        }
+        
+        .ssh-key-display {
+            background: rgba(10, 14, 39, 0.7);
+            border: 2px solid rgba(0, 212, 255, 0.2);
+            border-radius: 6px;
+            padding: 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 10px;
+            color: #00d4ff;
+            word-break: break-all;
+            max-height: 120px;
+            overflow-y: auto;
+            margin-bottom: 8px;
+        }
+        
+        .info-box {
+            background: rgba(0, 212, 255, 0.1);
+            border: 1px solid rgba(0, 212, 255, 0.3);
+            border-radius: 6px;
+            padding: 12px;
+            margin-top: 10px;
+            font-size: 11px;
+            line-height: 1.6;
+        }
+        
+        .info-box strong {
+            color: #00d4ff;
+            display: block;
+            margin-bottom: 6px;
+        }
+        
+        .info-box ol {
+            margin-left: 18px;
+            margin-top: 6px;
+        }
+        
+        .info-box li {
+            margin-bottom: 4px;
+        }
+        
+        .info-box code {
+            background: rgba(0, 212, 255, 0.2);
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            font-size: 10px;
+        }
+        
+        .spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            border-top-color: currentColor;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .full-width {
+            grid-column: 1 / -1;
+        }
+        
+        .two-col {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+        }
+        
+        @media (max-width: 1200px) {
+            .two-col {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>
+                <i class="fas fa-cog"></i>
+                Settings & Configuration
+            </h1>
+            <a href="/dashboard" class="btn">
+                <i class="fas fa-arrow-left"></i>
+                Back to Dashboard
+            </a>
+        </div>
+
+        <div class="settings-grid">
+            <!-- SSH Configuration Card -->
+            <div class="card">
+                <div class="card-title">
+                    <i class="fas fa-key"></i>
+                    SSH Key Management
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Current SSH Public Key</label>
+                    <div class="ssh-key-display" id="sshPublicKey">Loading...</div>
+                    <div class="input-group">
+                        <button class="btn btn-copy" onclick="copySSHKey()">
+                            <i class="fas fa-copy"></i>
+                            Copy Key
+                        </button>
+                        <button class="btn btn-generate" onclick="generateNewKey()">
+                            <i class="fas fa-sync-alt"></i>
+                            Generate New Key
+                        </button>
+                    </div>
+                    <div class="help-text">Copy this public key and add it to your new router's authorized_keys</div>
+                </div>
+
+                <div class="info-box">
+                    <strong><i class="fas fa-info-circle"></i> How to add this key to a new router:</strong>
+                    <ol>
+                        <li>Copy the public key above</li>
+                        <li>SSH into your new router: <code>ssh root@192.168.9.XXX</code></li>
+                        <li>Edit authorized_keys: <code>vi /etc/dropbear/authorized_keys</code></li>
+                        <li>Paste the key on a new line and save</li>
+                        <li>Add the router IP in the section below</li>
+                    </ol>
+                </div>
+
+                <div class="form-group" style="margin-top: 15px;">
+                    <label class="form-label">SSH Key Path</label>
+                    <input type="text" class="form-input" id="ssh_key" placeholder="/home/user/.ssh/id_ed25519" disabled>
+                    <div class="help-text">Current private key location (read-only)</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">SSH User</label>
+                    <input type="text" class="form-input" id="ssh_user" placeholder="root">
+                    <div class="help-text">SSH username (usually 'root' for OpenWrt)</div>
+                </div>
+            </div>
+
+            <!-- Router Management Card -->
+            <div class="card">
+                <div class="card-title">
+                    <i class="fas fa-router"></i>
+                    Router Management
+                </div>
+
+                <label class="form-label">Router IP Addresses</label>
+                <div class="help-text" style="margin-bottom: 10px;">Add or remove routers. Assumes SSH key is already installed on new routers.</div>
+                
+                <div class="router-list" id="routerList"></div>
+
+                <button class="btn-add" onclick="addRouter()">
+                    <i class="fas fa-plus"></i>
+                    Add Router
+                </button>
+
+                <div class="info-box" style="margin-top: 15px;">
+                    <strong><i class="fas fa-lightbulb"></i> Quick Tips:</strong>
+                    <ul style="margin-left: 18px; list-style: disc;">
+                        <li>New routers must be configured as dumb APs</li>
+                        <li>Ensure SSH key is installed before adding</li>
+                        <li>Changes take effect after clicking Save & Restart</li>
+                        <li>Collector will start polling new routers immediately</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Polling Configuration Card -->
+            <div class="card">
+                <div class="card-title">
+                    <i class="fas fa-clock"></i>
+                    Polling Configuration
+                </div>
+
+                <div class="two-col">
+                    <div class="form-group">
+                        <label class="form-label">Poll Interval (seconds)</label>
+                        <input type="number" class="form-input" id="poll_interval" min="5" max="120" value="10">
+                        <div class="help-text">How often to query routers for client data (5-120 seconds)</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">Ping Interval (seconds)</label>
+                        <input type="number" class="form-input" id="ping_interval" min="5" max="120" value="10">
+                        <div class="help-text">How often to check if routers are online (5-120 seconds)</div>
+                    </div>
+                </div>
+
+                <div class="info-box">
+                    <strong><i class="fas fa-tachometer-alt"></i> Performance Recommendations:</strong>
+                    <ul style="margin-left: 18px; list-style: disc;">
+                        <li><strong>1-10 routers:</strong> 10 seconds (recommended)</li>
+                        <li><strong>10-25 routers:</strong> 15-20 seconds</li>
+                        <li><strong>25+ routers:</strong> 30-60 seconds</li>
+                        <li>Lower intervals = more real-time, higher CPU usage</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Admin Password Card -->
+            <div class="card">
+                <div class="card-title">
+                    <i class="fas fa-lock"></i>
+                    Admin Password
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Current Password</label>
+                    <input type="password" class="form-input" id="current_password" placeholder="Enter current password">
+                    <div class="help-text">Required to change password</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">New Password</label>
+                    <input type="password" class="form-input" id="new_password" placeholder="Enter new password">
+                    <div class="help-text">Minimum 8 characters recommended</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Confirm New Password</label>
+                    <input type="password" class="form-input" id="confirm_password" placeholder="Confirm new password">
+                    <div class="help-text">Re-enter new password</div>
+                </div>
+
+                <div class="alert alert-warning" id="passwordWarning" style="display: block; margin-top: 10px;">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    Changing password will log you out. You'll need to login again with the new password.
+                </div>
+            </div>
+        </div>
+
+        <!-- Save Actions -->
+        <div class="card full-width">
+            <div class="actions">
+                <button class="btn-save" id="saveBtn" onclick="saveConfig()">
+                    <i class="fas fa-save"></i>
+                    Save & Restart Services
+                </button>
+            </div>
+
+            <div class="alert alert-success" id="successAlert">
+                <i class="fas fa-check-circle"></i>
+                <span id="successText">Configuration saved! Services restarting...</span>
+            </div>
+
+            <div class="alert alert-error" id="errorAlert">
+                <i class="fas fa-exclamation-circle"></i>
+                <span id="errorText">Error saving configuration</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let routers = [];
+        let currentSSHKey = '';
+
+        function addRouter(ip = '') {
+            routers.push(ip);
+            renderRouters();
+        }
+
+        function removeRouter(index) {
+            routers.splice(index, 1);
+            renderRouters();
+        }
+
+        function renderRouters() {
+            const container = document.getElementById('routerList');
+            container.innerHTML = routers.map((ip, index) => `
+                <div class="router-item">
+                    <input 
+                        type="text" 
+                        class="form-input router-input" 
+                        placeholder="192.168.9.XXX"
+                        value="${ip}"
+                        onchange="routers[${index}] = this.value"
+                        pattern="^((25[0-5]|(2[0-4]|1\\d|[1-9]|)\\d)\\.?\\b){4}$"
+                    >
+                    <button class="btn-remove" onclick="removeRouter(${index})">
+                        <i class="fas fa-trash"></i>
+                        Remove
+                    </button>
+                </div>
+            `).join('');
+        }
+
+        async function loadConfig() {
+            try {
+                const res = await fetch('/api/config');
+                const data = await res.json();
+                const config = data.config;
+
+                document.getElementById('ssh_key').value = config.ssh_key || '';
+                document.getElementById('ssh_user').value = config.ssh_user || 'root';
+                document.getElementById('poll_interval').value = config.poll_interval || 10;
+                document.getElementById('ping_interval').value = config.ping_interval || 10;
+
+                routers = config.routers || [];
+                if (routers.length === 0) {
+                    addRouter();
+                }
+                renderRouters();
+
+                // Load SSH public key
+                loadSSHPublicKey();
+            } catch (error) {
+                console.error('Error loading config:', error);
+                showError('Failed to load configuration');
+            }
+        }
+
+        async function loadSSHPublicKey() {
+            try {
+                const res = await fetch('/api/ssh-public-key');
+                const data = await res.json();
+                if (data.success && data.public_key) {
+                    currentSSHKey = data.public_key;
+                    document.getElementById('sshPublicKey').textContent = data.public_key;
+                } else {
+                    document.getElementById('sshPublicKey').textContent = 'No public key found';
+                }
+            } catch (error) {
+                console.error('Error loading SSH key:', error);
+                document.getElementById('sshPublicKey').textContent = 'Error loading key';
+            }
+        }
+
+        async function copySSHKey() {
+            try {
+                await navigator.clipboard.writeText(currentSSHKey);
+                showSuccess('SSH public key copied to clipboard!');
+            } catch (error) {
+                console.error('Error copying key:', error);
+                showError('Failed to copy key to clipboard');
+            }
+        }
+
+        async function generateNewKey() {
+            if (!confirm('⚠️ Warning: This will generate a NEW SSH key pair!\n\nYou will need to:\n1. Copy the new public key to ALL routers\n2. Update authorized_keys on each router\n3. Restart the collector\n\nContinue?')) {
+                return;
+            }
+
+            const btn = event.target.closest('button');
+            const originalHTML = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> Generating...';
+
+            try {
+                const res = await fetch('/api/generate-ssh-key', { method: 'POST' });
+                const data = await res.json();
+
+                if (data.success) {
+                    currentSSHKey = data.public_key;
+                    document.getElementById('sshPublicKey').textContent = data.public_key;
+                    document.getElementById('ssh_key').value = data.private_key_path;
+                    showSuccess('New SSH key generated! Copy it to your routers before saving.');
+                } else {
+                    throw new Error(data.error || 'Failed to generate key');
+                }
+            } catch (error) {
+                console.error('Error generating key:', error);
+                showError('Failed to generate SSH key: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalHTML;
+            }
+        }
+
+        async function saveConfig() {
+            const saveBtn = document.getElementById('saveBtn');
+            const successAlert = document.getElementById('successAlert');
+            const errorAlert = document.getElementById('errorAlert');
+
+            // Validate routers
+            const validRouters = routers.filter(ip => ip.trim() !== '');
+            if (validRouters.length === 0) {
+                showError('Please add at least one router IP');
+                return;
+            }
+
+            // Check if password change is requested
+            const currentPassword = document.getElementById('current_password').value.trim();
+            const newPassword = document.getElementById('new_password').value.trim();
+            const confirmPassword = document.getElementById('confirm_password').value.trim();
+
+            let passwordChange = null;
+            if (newPassword || currentPassword) {
+                if (!currentPassword) {
+                    showError('Please enter current password to change password');
+                    return;
+                }
+                if (newPassword !== confirmPassword) {
+                    showError('New passwords do not match');
+                    return;
+                }
+                if (newPassword.length < 8) {
+                    showError('New password must be at least 8 characters');
+                    return;
+                }
+                passwordChange = {
+                    current: currentPassword,
+                    new: newPassword
+                };
+            }
+
+            // Disable button
+            saveBtn.disabled = true;
+            saveBtn.innerHTML = '<span class="spinner"></span> Saving & Restarting Services...';
+
+            const config = {
+                ssh_key: document.getElementById('ssh_key').value.trim(),
+                ssh_user: document.getElementById('ssh_user').value.trim() || 'root',
+                poll_interval: parseInt(document.getElementById('poll_interval').value) || 10,
+                ping_interval: parseInt(document.getElementById('ping_interval').value) || 10,
+                routers: validRouters,
+                password_change: passwordChange
+            };
+
+            try {
+                const res = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+
+                const data = await res.json();
+
+                if (res.ok && data.success) {
+                    if (passwordChange) {
+                        showSuccess('Configuration saved! Password changed. Redirecting to login...');
+                        setTimeout(() => {
+                            window.location.href = '/logout';
+                        }, 2000);
+                    } else {
+                        showSuccess('Configuration saved! Services restarting... Redirecting to dashboard...');
+                        setTimeout(() => {
+                            window.location.href = '/dashboard';
+                        }, 3000);
+                    }
+                } else {
+                    throw new Error(data.error || 'Save failed');
+                }
+            } catch (error) {
+                console.error('Error saving config:', error);
+                showError('Error saving configuration: ' + error.message);
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = '<i class="fas fa-save"></i> Save & Restart Services';
+            }
+        }
+
+        function showSuccess(message) {
+            const successAlert = document.getElementById('successAlert');
+            const errorAlert = document.getElementById('errorAlert');
+            document.getElementById('successText').textContent = message;
+            successAlert.style.display = 'block';
+            errorAlert.style.display = 'none';
+        }
+
+        function showError(message) {
+            const successAlert = document.getElementById('successAlert');
+            const errorAlert = document.getElementById('errorAlert');
+            document.getElementById('errorText').textContent = message;
+            errorAlert.style.display = 'block';
+            successAlert.style.display = 'none';
+        }
+
+        // Load config on page load
+        loadConfig();
+    </script>
+</body>
+</html>

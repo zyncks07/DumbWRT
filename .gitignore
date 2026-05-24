@@ -1,0 +1,42 @@
+# Separate, unrelated captive-portal voucher app — see CLAUDE.md §4.
+# Should eventually move out of this tree; ignored here so it doesn't
+# pollute the monitor's git history.
+wifi/
+
+# Claude Code per-project state
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# Logs
+*.log
+
+# SQLite / DB backups (paths under /var/lib are out-of-tree, but if any
+# end up here by hand they shouldn't be committed)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.backup-*
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Secrets (must not be committed — see CLAUDE.md §3 auth section)
+auth.json
+secret
+.env
+.env.*
