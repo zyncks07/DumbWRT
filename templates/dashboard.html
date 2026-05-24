@@ -359,12 +359,22 @@
         }
         .router-th, .router-tr {
             display: grid;
-            grid-template-columns: 28px minmax(140px, 1.4fr) 110px 60px 60px 60px 64px minmax(90px, 1fr) 28px;
+            grid-template-columns: 28px minmax(140px, 1.4fr) 110px 60px 60px 60px 64px 90px 110px 28px;
             align-items: center;
             gap: 10px;
             padding: 0 14px;
             font-size: 12px;
         }
+        .reach-strip {
+            height: 14px;
+            border-radius: 3px;
+            overflow: hidden;
+            background: var(--card-bg-3);
+            display: flex;
+            width: 100%;
+        }
+        .reach-strip .seg.online  { background: var(--ok); }
+        .reach-strip .seg.offline { background: var(--err); opacity: 0.85; }
         .router-th {
             height: 32px;
             color: var(--fg-muted);
@@ -520,6 +530,36 @@
     <script>
         let expandedRouters = new Set();
         let currentRouterData = {}; // Cache to prevent unnecessary re-renders
+        let reachData = {};
+        let reachWindow = 86400;
+
+        function renderReachStrip(segments, windowSec) {
+            if (!segments || !segments.length) return '<div class="reach-strip"></div>';
+            const parts = segments.map(s => {
+                const [start, end, online] = s;
+                const w = ((end - start) / windowSec * 100).toFixed(3);
+                const cls = online ? 'online' : 'offline';
+                return `<div class="seg ${cls}" style="width:${w}%"></div>`;
+            }).join('');
+            return `<div class="reach-strip">${parts}</div>`;
+        }
+
+        async function fetchReachability() {
+            try {
+                const r = await fetch('/api/reachability');
+                const d = await r.json();
+                if (!d.success) return;
+                reachData = d.routers || {};
+                reachWindow = d.window_seconds || 86400;
+                Object.keys(reachData).forEach(ip => {
+                    const safeIP = ip.replace(/\./g, '_');
+                    const cell = document.getElementById(`reach-${safeIP}`);
+                    if (cell) cell.innerHTML = renderReachStrip(reachData[ip], reachWindow);
+                });
+            } catch (e) {
+                console.error('reachability fetch failed', e);
+            }
+        }
 
         function getSignalClass(signal) {
             if (signal >= -50) return 'signal-excellent';
@@ -601,6 +641,7 @@
 
         function renderRouterRow(r, safeIP, isExpanded) {
             const online = r.online === 1;
+            const reachHtml = renderReachStrip(reachData[r.ip], reachWindow);
             return `
                 <div class="router-tr${online ? '' : ' offline'}${isExpanded ? ' expanded' : ''}"
                      id="router-row-${safeIP}"
@@ -614,6 +655,7 @@
                     <div class="num b5">${r.clients_5 || 0}</div>
                     <div class="num load">${fmtLoad(r.load1)}</div>
                     <div class="upt">${fmtUptime(r.uptime)}</div>
+                    <div id="reach-${safeIP}">${reachHtml}</div>
                     <div><i class="fas fa-chevron-right ch"></i></div>
                 </div>
             `;
@@ -662,6 +704,7 @@
                                 <div class="num">5G</div>
                                 <div class="num">Load</div>
                                 <div>Uptime</div>
+                                <div>Last 24h</div>
                                 <div></div>
                             </div>
                         `;
@@ -823,7 +866,7 @@
         }
 
         // Initial load
-        renderRouters();
+        fetchReachability().then(renderRouters);
         updateStats();
 
         // Auto-refresh every 10 seconds
@@ -831,6 +874,8 @@
             renderRouters();
             updateStats();
         }, 10000);
+        // Reachability changes slowly — refresh every 5 minutes.
+        setInterval(fetchReachability, 5 * 60 * 1000);
     </script>
     <script src="/static/theme.js"></script>
 </body>

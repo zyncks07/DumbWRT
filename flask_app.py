@@ -184,6 +184,87 @@ def api_clients():
 def clients_page():
     return render_template('clients.html')
 
+
+@app.route('/api/reachability')
+@login_required
+def api_reachability():
+    """Per-router online/offline timeline for the last 24h.
+
+    Returns offsets in seconds from window_start (compact for the wire).
+    Each segment: [start_offset, end_offset, online_flag].
+    """
+    from datetime import timedelta
+
+    now = datetime.now()
+    window_start = now - timedelta(hours=24)
+    window_seconds = int((now - window_start).total_seconds())
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("SELECT ip, online FROM routers")
+    routers_rows = cur.fetchall()
+
+    out = {}
+    for row in routers_rows:
+        ip = row['ip']
+        cur.execute(
+            """
+            SELECT ts, online FROM router_status_history
+             WHERE router_ip = ? AND ts >= ?
+             ORDER BY ts ASC
+            """,
+            (ip, window_start.isoformat()),
+        )
+        transitions = cur.fetchall()
+
+        segments = []
+        if not transitions:
+            # No state change in the window — assume current state held throughout.
+            segments.append([0, window_seconds, int(row['online'])])
+        else:
+            # State BEFORE the first transition was the opposite of what the
+            # transition set. This is the safe inference without a second query.
+            first_state = 1 - int(transitions[0]['online'])
+            try:
+                first_offset = int(
+                    (datetime.fromisoformat(transitions[0]['ts']) - window_start).total_seconds()
+                )
+            except (TypeError, ValueError):
+                first_offset = 0
+            if first_offset > 0:
+                segments.append([0, first_offset, first_state])
+
+            n = len(transitions)
+            for i in range(n):
+                try:
+                    t_off = int(
+                        (datetime.fromisoformat(transitions[i]['ts']) - window_start).total_seconds()
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if i + 1 < n:
+                    try:
+                        next_off = int(
+                            (datetime.fromisoformat(transitions[i + 1]['ts']) - window_start).total_seconds()
+                        )
+                    except (TypeError, ValueError):
+                        next_off = window_seconds
+                else:
+                    next_off = window_seconds
+                if next_off > t_off:
+                    segments.append([t_off, next_off, int(transitions[i]['online'])])
+
+        out[ip] = segments
+
+    conn.close()
+    return jsonify({
+        'success': True,
+        'window_start': window_start.isoformat(),
+        'window_seconds': window_seconds,
+        'routers': out,
+    })
+
 @app.route('/api/stats')
 @login_required
 def api_stats():

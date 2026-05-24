@@ -169,7 +169,7 @@ Ordered by **impact / risk**. Don't reorder without good reason — earlier item
     - VACUUM runs as part of every cleanup (no separate schedule).
     - The collector schedules `retention.run_cleanup` daily via `retention_loop`. Manual "Run cleanup now" button hits `POST /api/maintenance/run-now`.
     - Status (last run, rows deleted, duration, ok/err) lives in the `retention_status` single-row table.
-13. **Reachability strip per router** — last 24h online/offline timeline from `router_status_history`.
+13. **Reachability strip per router** — last 24h online/offline timeline from `router_status_history`. **Done** — new `GET /api/reachability` returns compact `[start_off, end_off, online]` segments per router. Dashboard adds a "Last 24h" column to the dense table rendered as flex-box `.reach-strip` divs (green = online, red = offline). Fetched once on load (before first router render so strips aren't empty) and refreshed every 5 minutes; not joined into `/api/routers` to keep the 10 s poll lean.
 14. **DB backup/restore endpoint.** The `monitor.db.backup-*` files in `/var/lib/openwrt-monitor/` show this is already partially done by hand. Wire it up: nightly snapshot, prune older than N days, manual "download backup" button.
 
 ### P4 — UI overhaul (info density + theme)
