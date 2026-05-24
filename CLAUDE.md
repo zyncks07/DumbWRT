@@ -34,7 +34,7 @@ A web app that monitors WiFi clients across a fleet of OpenWrt routers (currentl
 | SSH client config | `/etc/openwrt-monitor/ssh_config` (ControlMaster multiplex) |
 | SQLite database | `/var/lib/openwrt-monitor/monitor.db` |
 | DB backups | `/var/lib/openwrt-monitor/monitor.db.backup-*` |
-| Collector log | `/var/log/openwrt-collector.log` (no rotation today) |
+| Collector log | `/var/log/openwrt-collector.log` (logrotate config installed; 5 MB × 5) |
 | Live systemd units | `/etc/systemd/system/openwrt-collector.service`, `openwrt-dashboard.service` — now `ExecStart` from the project root |
 | Unrelated voucher app | `/var/www/openwrt-monitor/wifi/` — separate Node/Express app on port 3000; **NOT part of the monitor**, left in place when the monitor moved |
 | Stray old dashboard file | `/home/bulik/apps/openwrt-monitor/templatesclear` — old variant carried along by the rsync; safe to delete |
@@ -155,7 +155,7 @@ Ordered by **impact / risk**. Don't reorder without good reason — earlier item
 1. **`git init`** at the new project root, `main` branch, initial snapshot commit, `.gitignore`. **Done.**
 2. **Move hardcoded credentials out of `flask_app.py`** into `/etc/openwrt-monitor/auth.json` with an Argon2 hash. Stop the in-place source rewrite. **Done.**
 3. **Vendor Font Awesome + fonts into `/static/`.** Drop every CDN `<link>` from `templates/*.html`. **Done** — Font Awesome 6.4.0 Free at `static/fontawesome/{css,webfonts}/`. Only the woff2 + ttf for `solid-900`, `regular-400`, `brands-400` are vendored (skipped `v4compatibility` and `svg-with-js` since unused).
-4. **logrotate config** for `/var/log/openwrt-collector.log` (e.g. 5 MB × 5 files, `copytruncate`).
+4. **logrotate config** for `/var/log/openwrt-collector.log` (5 MB × 5 files, `copytruncate`). **Done** — config in `system/openwrt-monitor.logrotate`, installed at `/etc/logrotate.d/openwrt-monitor`. `copytruncate` is required because `ubus_collector.py` uses `logging.FileHandler` which holds the FD open.
 
 ### P1 — Async migration (the actual unlock for 30 routers)
 
