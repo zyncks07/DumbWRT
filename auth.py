@@ -17,7 +17,7 @@ import secrets
 from pathlib import Path
 
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError, InvalidHashError
+from argon2.exceptions import Argon2Error
 
 AUTH_PATH = Path("/etc/openwrt-monitor/auth.json")
 
@@ -52,7 +52,7 @@ def verify(username: str, password: str) -> bool:
 
     try:
         _hasher.verify(data["password_hash"], password or "")
-    except (VerifyMismatchError, InvalidHashError):
+    except Argon2Error:
         return False
     return True
 
@@ -66,7 +66,7 @@ def change_password(current: str, new: str) -> tuple[bool, str]:
 
     try:
         _hasher.verify(data["password_hash"], current or "")
-    except (VerifyMismatchError, InvalidHashError):
+    except Argon2Error:
         return False, "Current password is incorrect"
 
     if not new or len(new) < 4:
