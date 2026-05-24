@@ -85,45 +85,36 @@ Both as `root`, `Restart=always`. Saving config in the UI calls `systemctl resta
 
 ---
 
-## 3. Target Architecture (v2 — what we are building toward)
+## 3. Target Architecture (what we are building toward)
 
-### Web layer: FastAPI on uvicorn
+### Scope clarification
 
-- Replaces Flask.
-- Native async, WebSocket and SSE built in, Pydantic request/response models, auto OpenAPI.
-- One process, one worker (this box has one CPU's worth of useful compute — don't fan out).
-- Keep the same URL surface as v1 during migration so the frontend doesn't break mid-flight.
+The original plan in this section called for a Flask → FastAPI migration plus a WebSocket live-update channel (old P1 #6 and #7). **Those are deferred / probably skipped.** The CPU bottleneck is in the collector, not the web layer. Flask reads SQLite cheaply and handles the dashboard fine even at 30 routers. FastAPI would be structural prettiness, not a real win, and the WebSocket is UX polish we can revisit only if browser polling actually becomes a problem.
 
 ### Collector: asyncio + asyncssh
 
-- A single asyncio event loop replaces the current 2N threads (poll + ping per router).
-- One **persistent** `asyncssh.connect()` per router, reused across polls. No more `subprocess.run(['ssh', ...])` — that fork is the main thing pinning the Atom.
-- Per-router task scheduled at `poll_interval`; ping is a lightweight `connection.run('echo OK')` on the existing channel.
-- Bounded concurrency with a semaphore (so a flapping router can't starve the loop).
-- Exponential backoff on connect failures, marking the router offline in the DB.
+- Single asyncio event loop replaces the previous 2N threads (poll + ping per router).
+- One **persistent** `asyncssh.connect()` per router, reused across polls. No more `subprocess.run(['ssh', ...])` forking each call — that was the main CPU drain on Atom.
+- Per-router task: connect → poll loop. If a poll fails, drop the connection, mark offline, reconnect with exponential backoff.
+- Hostname fetch on each poll doubles as a liveness check, so the v1 separate ping thread is gone. Poll interval is still configurable in `config.json`.
 
-### DB: stay on SQLite (right size for one box), but tune it
+### Web layer: keep Flask
 
-- WAL mode, `PRAGMA synchronous=NORMAL`, `PRAGMA mmap_size`, `PRAGMA cache_size` — set on connection open.
-- New time-series tables (see roadmap §5 P2): `client_history`, `interface_history`, `router_status_history`, `system_metrics`.
-- New `dhcp_leases` table, ingested from `/tmp/dhcp.leases` over SSH, JOINed on MAC so the UI shows IP + hostname instead of raw MAC.
-- Retention bounded by the Logs Maintenance page (§5 P3).
+- No FastAPI migration. Flask + SQLite is fine for a one-box, 30-router monitor.
+- Browser polls `/api/*` on a `setInterval`. Acceptable until/unless it isn't.
 
-### Live updates: WebSocket, not polling
+### DB: stay on SQLite, tune it later if needed
 
-- One channel `/ws/live` that pushes router status changes and client deltas.
-- The dashboard subscribes once on load; remove every `setInterval(fetch...)` from the templates.
+- WAL mode + sensible PRAGMAs is a P2 task if we add the time-series tables (`client_history`, etc.).
+- For now, schema is unchanged from v1: `routers`, `interfaces`, `clients`.
 
-### Auth: move credentials out of source
+### Auth (already done — see §2)
 
-- Argon2-hashed password in `/etc/openwrt-monitor/auth.json` (mode 600, root-only).
-- Session-based via FastAPI middleware. Stable secret read from the same file (or `/etc/openwrt-monitor/secret`).
-- Delete the in-place source-rewrite password change.
+- Argon2-hashed creds in `/etc/openwrt-monitor/auth.json`, stable `secret_key`, no in-source rewrite.
 
-### Service unit
+### Service units (already done)
 
-- One unified `openwrt-monitor.service` running `uvicorn` against the project tree.
-- The collector runs as an asyncio task inside the same process. Single process keeps memory low; if isolation matters later, split into two units.
+- `openwrt-collector.service` and `openwrt-dashboard.service`, both `ExecStart` from the project tree, no `/usr/local/bin` copies.
 
 ---
 
@@ -133,9 +124,9 @@ Both as `root`, `Restart=always`. Saving config in the UI calls `systemctl resta
 - **Git is initialized.** `git init` on the project root with `main` branch and an initial snapshot commit. `.gitignore` excludes the wifi voucher app, `.claude/` state, logs, `*.backup-*`, and secrets.
 - **Font Awesome is vendored at `static/fontawesome/`.** Templates link `/static/fontawesome/css/all.min.css` — no public CDN in the critical path. If you need a new icon style or a different FA version, drop the woff2+ttf into `static/fontawesome/webfonts/` and update the CSS; do NOT add a CDN link back.
 - **Auth dies hard if `auth.json` is missing.** `flask_app.py` calls `sys.exit(1)` at import time if `/etc/openwrt-monitor/auth.json` is absent or malformed. This is intentional — there is no fallback to hardcoded credentials. Bootstrap with `sudo python3 scripts/init_auth.py`.
-- **SSH multiplex is already set up.** `/etc/openwrt-monitor/ssh_config` has `ControlMaster auto`, `ControlPersist 10m`, `ServerAliveInterval 30`. Always pass `-F /etc/openwrt-monitor/ssh_config` if you open a raw `ssh` subprocess. (In v2, `asyncssh` replaces the need entirely.)
+- **SSH is handled by `asyncssh` now.** The collector keeps one persistent connection per router; channel multiplexing is native, no `ControlMaster` needed. `/etc/openwrt-monitor/ssh_config` is left in place only for ad-hoc CLI use; the collector no longer reads it.
 - **`clients` table is destructive.** Don't try to query historical client data from it — there isn't any. History goes in the new `*_history` tables (§5 P2).
-- **Threads-per-router doesn't scale.** Today: 30 routers × 2 threads × per-poll `subprocess` fork is the dominant CPU cost. This is *the* reason for the asyncio migration, not aesthetics.
+- **Collector is single-process asyncio.** One persistent `asyncssh` connection per router, kept open across polls. The v1 model (2N threads + per-poll `subprocess` fork) is gone — that was the dominant CPU cost on Atom.
 - **One SSH key for everything.** Documented assumption. If that changes, half the code changes too.
 - **Deploying a change today** = edit file → `systemctl restart openwrt-collector openwrt-dashboard`. After v2 → `systemctl restart openwrt-monitor`.
 - **`/var/www/openwrt-monitor/wifi/` is a separate app.** Captive-portal voucher dispenser, port 3000 (Node/Express). It used to be nested inside this project when the monitor lived at `/var/www/openwrt-monitor/`; the monitor moved to `~/apps/openwrt-monitor/` in P0 #0 and the wifi app stayed put. It is gitignored. Don't touch it from this repo.
@@ -157,11 +148,11 @@ Ordered by **impact / risk**. Don't reorder without good reason — earlier item
 3. **Vendor Font Awesome + fonts into `/static/`.** Drop every CDN `<link>` from `templates/*.html`. **Done** — Font Awesome 6.4.0 Free at `static/fontawesome/{css,webfonts}/`. Only the woff2 + ttf for `solid-900`, `regular-400`, `brands-400` are vendored (skipped `v4compatibility` and `svg-with-js` since unused).
 4. **logrotate config** for `/var/log/openwrt-collector.log` (5 MB × 5 files, `copytruncate`). **Done** — config in `system/openwrt-monitor.logrotate`, installed at `/etc/logrotate.d/openwrt-monitor`. `copytruncate` is required because `ubus_collector.py` uses `logging.FileHandler` which holds the FD open.
 
-### P1 — Async migration (the actual unlock for 30 routers)
+### P1 — Async collector (the actual unlock for 30 routers)
 
-5. **Port the collector to asyncio + asyncssh.** One persistent connection per router. Kill `subprocess.run(['ssh', ...])`.
-6. **Port Flask → FastAPI.** Preserve URL paths so the frontend keeps working. Move auth to FastAPI session middleware.
-7. **Add WebSocket `/ws/live`.** Server pushes router status changes and client deltas. Remove `setInterval(fetch...)` from `dashboard.html`.
+5. **Port the collector to asyncio + asyncssh.** One persistent connection per router. Kill `subprocess.run(['ssh', ...])`. **Done.**
+6. ~~**Port Flask → FastAPI.**~~ **Deferred / probably skipped.** Flask is fine for a one-box monitor; the web layer isn't the bottleneck. Revisit only if there's a real reason to.
+7. ~~**Add WebSocket `/ws/live`.**~~ **Deferred.** Browser polling on `setInterval` is acceptable. Revisit if it actually becomes a problem.
 
 ### P2 — Historize the discarded data
 
