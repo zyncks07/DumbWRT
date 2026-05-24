@@ -24,18 +24,20 @@ A web app that monitors WiFi clients across a fleet of OpenWrt routers (currentl
 
 | Purpose | Path |
 |---|---|
-| Flask web app | `/usr/local/bin/flask_app.py` (port 5000) |
-| SSH/ubus collector daemon | `/usr/local/bin/ubus_collector.py` |
-| HTML templates | `/var/www/openwrt-monitor/templates/{login,dashboard,config,logs}.html` |
-| Static assets | `/var/www/openwrt-monitor/static/` (empty — everything is inlined in templates) |
+| Project root (canonical) | `/home/bulik/apps/openwrt-monitor/` |
+| Flask web app | `/home/bulik/apps/openwrt-monitor/flask_app.py` (port 5000) |
+| SSH/ubus collector daemon | `/home/bulik/apps/openwrt-monitor/ubus_collector.py` |
+| HTML templates | `/home/bulik/apps/openwrt-monitor/templates/{login,dashboard,config,logs}.html` |
+| Static assets | `/home/bulik/apps/openwrt-monitor/static/` (empty — everything is inlined in templates) |
+| Systemd unit copies in repo | `/home/bulik/apps/openwrt-monitor/system/openwrt-{collector,dashboard}.service` |
 | Runtime config | `/etc/openwrt-monitor/config.json` |
 | SSH client config | `/etc/openwrt-monitor/ssh_config` (ControlMaster multiplex) |
 | SQLite database | `/var/lib/openwrt-monitor/monitor.db` |
 | DB backups | `/var/lib/openwrt-monitor/monitor.db.backup-*` |
 | Collector log | `/var/log/openwrt-collector.log` (no rotation today) |
-| Systemd units | `/etc/systemd/system/openwrt-collector.service`, `openwrt-dashboard.service` |
-| Unrelated voucher app | `/var/www/openwrt-monitor/wifi/` — **NOT part of the monitor**, leave it alone |
-| Stray old dashboard | `/var/www/openwrt-monitor/templatesclear` — appears to be an old variant; ignore or delete |
+| Live systemd units | `/etc/systemd/system/openwrt-collector.service`, `openwrt-dashboard.service` — now `ExecStart` from the project root |
+| Unrelated voucher app | `/var/www/openwrt-monitor/wifi/` — separate Node/Express app on port 3000; **NOT part of the monitor**, left in place when the monitor moved |
+| Stray old dashboard file | `/home/bulik/apps/openwrt-monitor/templatesclear` — old variant carried along by the rsync; safe to delete |
 
 ### Tables in `monitor.db`
 
@@ -73,8 +75,8 @@ templates/*.html  (inline CSS+JS, polls via setInterval)
 ### Systemd
 
 ```
-openwrt-collector.service  →  python3 /usr/local/bin/ubus_collector.py
-openwrt-dashboard.service  →  python3 /usr/local/bin/flask_app.py
+openwrt-collector.service  →  python3 /home/bulik/apps/openwrt-monitor/ubus_collector.py
+openwrt-dashboard.service  →  python3 /home/bulik/apps/openwrt-monitor/flask_app.py
 ```
 
 Both as `root`, `Restart=always`. Saving config in the UI calls `systemctl restart` on both. After v2 these collapse into a single `openwrt-monitor.service`.
@@ -125,17 +127,17 @@ Both as `root`, `Restart=always`. Saving config in the UI calls `systemctl resta
 
 ## 4. Conventions & Gotchas (read before you edit anything)
 
-- **Canonical project root is `/var/www/openwrt-monitor/`.** The running Python files at `/usr/local/bin/` are *copies*. Until the v2 migration unifies this, any edit to runtime code must be made in both places, and the systemd units must be restarted. After v2, `ExecStart` runs from a venv in the project tree — no more `/usr/local/bin` copies.
-- **No git yet.** There is no `.git` in `/var/www/openwrt-monitor/`. First task of any real refactor: `git init`, commit current state, add `.gitignore`. Do this before P0 below.
+- **Canonical project root is `/home/bulik/apps/openwrt-monitor/`** — moved here from `/var/www/openwrt-monitor/` so the tree is bulik-owned (no sudo or `safe.directory` friction for git or edits) and no longer mixed with the unrelated voucher app. Systemd units now `ExecStart` directly from this tree; there is no `/usr/local/bin/` copy of the Python files to keep in sync.
+- **Git is initialized.** `git init` on the project root with `main` branch and an initial snapshot commit. `.gitignore` excludes the wifi voucher app, `.claude/` state, logs, `*.backup-*`, and secrets.
 - **CDNs in the critical path.** `dashboard.html`, `config.html`, `logs.html` all `<link>` Font Awesome and Google Fonts from public CDNs. The Atom box is intranet-facing — if its uplink drops, the UI stalls. Vendor all assets into `/static/` and remove the `<link>` tags.
-- **Password is rewritten in source on change.** `flask_app.py` ~line 200 does `content.replace(f"PASSWORD = '{PASSWORD}'", f"PASSWORD = '{new_pw}'")` and writes back to `/usr/local/bin/flask_app.py`. Don't preserve this. Move auth to a config file in v2.
+- **Password is rewritten in source on change.** `flask_app.py` ~line 200 does `content.replace(f"PASSWORD = '{PASSWORD}'", f"PASSWORD = '{new_pw}'")` and writes back to `/home/bulik/apps/openwrt-monitor/flask_app.py`. Don't preserve this. P0 #2 replaces it with config-based Argon2 auth.
 - **SSH multiplex is already set up.** `/etc/openwrt-monitor/ssh_config` has `ControlMaster auto`, `ControlPersist 10m`, `ServerAliveInterval 30`. Always pass `-F /etc/openwrt-monitor/ssh_config` if you open a raw `ssh` subprocess. (In v2, `asyncssh` replaces the need entirely.)
 - **`clients` table is destructive.** Don't try to query historical client data from it — there isn't any. History goes in the new `*_history` tables (§5 P2).
 - **Threads-per-router doesn't scale.** Today: 30 routers × 2 threads × per-poll `subprocess` fork is the dominant CPU cost. This is *the* reason for the asyncio migration, not aesthetics.
 - **One SSH key for everything.** Documented assumption. If that changes, half the code changes too.
 - **Deploying a change today** = edit file → `systemctl restart openwrt-collector openwrt-dashboard`. After v2 → `systemctl restart openwrt-monitor`.
-- **`/var/www/openwrt-monitor/wifi/` is a separate app.** Captive-portal voucher dispenser, runs on port 3000 (Node/Express). Not part of the monitor. Leave it alone or move it out.
-- **`templatesclear` at the project root** is an old standalone dashboard file. Don't treat it as canonical; delete or fold into git history once §5 P0 lands.
+- **`/var/www/openwrt-monitor/wifi/` is a separate app.** Captive-portal voucher dispenser, port 3000 (Node/Express). It used to be nested inside this project when the monitor lived at `/var/www/openwrt-monitor/`; the monitor moved to `~/apps/openwrt-monitor/` in P0 #0 and the wifi app stayed put. It is gitignored. Don't touch it from this repo.
+- **`templatesclear` at the project root** is an old standalone dashboard file carried along by the move. Delete it once you're sure nothing references it.
 - **Saving config restarts services.** `POST /api/config` calls `systemctl restart openwrt-collector openwrt-dashboard`. Expect a brief gap in polling. In v2 (single process), prefer a SIGHUP-style live reload.
 - **Storage today:** ~31 MB DB, ~20 MB log. With history added and 30 routers, both will grow fast. Retention is non-optional.
 
@@ -147,7 +149,8 @@ Ordered by **impact / risk**. Don't reorder without good reason — earlier item
 
 ### P0 — Foundation (do first; unblocks everything else)
 
-1. **`git init`** the project root at `/var/www/openwrt-monitor/`. Commit the current state. Add `.gitignore` (exclude `wifi/node_modules/`, `*.backup-*`, `__pycache__/`).
+0. **Relocate project tree to `/home/bulik/apps/openwrt-monitor/`** so it is bulik-owned and unmixed from the wifi voucher app. Update `template_folder`/`static_folder` in `flask_app.py` and `WorkingDirectory`/`ExecStart` in the systemd units. **Done.**
+1. **`git init`** at the new project root, `main` branch, initial snapshot commit, `.gitignore`. **Done.**
 2. **Move hardcoded credentials out of `flask_app.py`** into `/etc/openwrt-monitor/auth.json` with an Argon2 hash. Stop the in-place source rewrite.
 3. **Vendor Font Awesome + fonts into `/static/`.** Drop every CDN `<link>` from `templates/*.html`.
 4. **logrotate config** for `/var/log/openwrt-collector.log` (e.g. 5 MB × 5 files, `copytruncate`).
@@ -213,7 +216,7 @@ Ordered by **impact / risk**. Don't reorder without good reason — earlier item
 
 ## 7. How to Work on This Project (orientation checklist for future Claude)
 
-1. **Read this file first.** Then skim `templates/dashboard.html` to see what the UI currently does, and `/usr/local/bin/ubus_collector.py` to see what data is being collected.
+1. **Read this file first.** Then skim `templates/dashboard.html` to see what the UI currently does, and `ubus_collector.py` to see what data is being collected.
 2. **See what's running:**
    ```
    systemctl status openwrt-collector openwrt-dashboard   # pre-v2
@@ -228,5 +231,5 @@ Ordered by **impact / risk**. Don't reorder without good reason — earlier item
 5. **Don't add data without thinking about retention.** Storage is the user's #2 pain point after CPU.
 6. **Don't import a heavy npm or CDN library to "improve the UI".** The rules in §6 are binding.
 7. **Don't commit secrets.** The hardcoded password in v1's `flask_app.py` must not survive into v2.
-8. **Edits to runtime code today must be mirrored to `/usr/local/bin/`** until P1 lands and the systemd unit `ExecStart`s from the project tree.
+8. **Edits to `flask_app.py` and `ubus_collector.py` take effect on `systemctl restart`** — the systemd units `ExecStart` directly from this project tree, so there is no mirror step.
 9. **After any code change:** `sudo systemctl restart openwrt-collector openwrt-dashboard` (or the unified unit post-v2). Then `journalctl -u <unit> -f` to confirm clean startup.

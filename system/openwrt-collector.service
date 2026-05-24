@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenWrt Ubus Collector
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /home/bulik/apps/openwrt-monitor/ubus_collector.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

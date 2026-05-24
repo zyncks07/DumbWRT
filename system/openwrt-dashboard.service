@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenWrt Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/bulik/apps/openwrt-monitor
+Environment="FLASK_APP=/home/bulik/apps/openwrt-monitor/flask_app.py"
+ExecStart=/usr/bin/python3 /home/bulik/apps/openwrt-monitor/flask_app.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

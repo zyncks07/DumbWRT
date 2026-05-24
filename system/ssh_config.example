@@ -1,0 +1,8 @@
+Host *
+  ControlMaster auto
+  ControlPath /tmp/ssh-openwrt-%r@%h:%p
+  ControlPersist 10m
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
