@@ -14,6 +14,7 @@ import json
 import logging
 import signal
 import sqlite3
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -29,6 +30,10 @@ CONNECT_TIMEOUT = 5
 COMMAND_TIMEOUT = 10
 BACKOFF_INITIAL = 2
 BACKOFF_MAX = 60
+# Seconds between history snapshots. Decoupled from poll_interval
+# so we can poll frequently for the live view without bloating the
+# history tables. Override per-deploy via config['history_interval'].
+HISTORY_INTERVAL_DEFAULT = 60
 
 
 logging.basicConfig(
@@ -96,6 +101,62 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_clients_router ON clients(router_ip)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_clients_mac ON clients(mac)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_interfaces_router ON interfaces(router_ip)")
+
+    # ---- History tables (P2 #8) ----
+    # Append-only; bounded by retention task (P3, not yet wired up).
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS client_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts DATETIME NOT NULL,
+            router_ip TEXT NOT NULL,
+            interface TEXT NOT NULL,
+            mac TEXT NOT NULL,
+            signal INTEGER,
+            rx_rate INTEGER, tx_rate INTEGER,
+            rx_bytes INTEGER, tx_bytes INTEGER,
+            connected_time INTEGER
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_client_history_ts ON client_history(ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_client_history_mac_ts ON client_history(mac, ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_client_history_router_ts ON client_history(router_ip, ts)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS interface_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts DATETIME NOT NULL,
+            router_ip TEXT NOT NULL,
+            interface TEXT NOT NULL,
+            num_clients INTEGER,
+            channel INTEGER,
+            frequency INTEGER
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_iface_history_ts ON interface_history(ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_iface_history_router_ts ON interface_history(router_ip, ts)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS router_status_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts DATETIME NOT NULL,
+            router_ip TEXT NOT NULL,
+            online INTEGER NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_status_history_router_ts ON router_status_history(router_ip, ts)")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS system_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts DATETIME NOT NULL,
+            router_ip TEXT NOT NULL,
+            uptime INTEGER,
+            load1 REAL, load5 REAL, load15 REAL,
+            mem_total INTEGER, mem_free INTEGER, mem_used INTEGER
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_sysmetrics_router_ts ON system_metrics(router_ip, ts)")
+
     conn.commit()
     conn.close()
 
@@ -137,12 +198,25 @@ def parse_client(c: dict) -> dict:
     }
 
 
+def _check_transition(cur, router_ip: str, new_online: int, now: str):
+    """Append a router_status_history row only if online state actually changed."""
+    cur.execute("SELECT online FROM routers WHERE ip=?", (router_ip,))
+    row = cur.fetchone()
+    prev = row[0] if row else None
+    if prev != new_online:
+        cur.execute(
+            "INSERT INTO router_status_history (ts, router_ip, online) VALUES (?, ?, ?)",
+            (now, router_ip, new_online),
+        )
+
+
 def save_snapshot(router_ip: str, hostname: str, interfaces: list[dict]):
     """Persist one poll's results."""
     now = datetime.now().isoformat()
     conn = sqlite3.connect(DB_PATH)
     try:
         cur = conn.cursor()
+        _check_transition(cur, router_ip, 1, now)
         cur.execute("""
             INSERT INTO routers (ip, hostname, online, last_seen, first_seen)
             VALUES (?, ?, 1, ?, ?)
@@ -217,11 +291,59 @@ def mark_offline(router_ip: str):
     conn = sqlite3.connect(DB_PATH)
     try:
         cur = conn.cursor()
+        _check_transition(cur, router_ip, 0, now)
         cur.execute("""
             INSERT INTO routers (ip, hostname, online, last_seen, first_seen)
             VALUES (?, ?, 0, ?, ?)
             ON CONFLICT(ip) DO UPDATE SET online=0
         """, (router_ip, router_ip, now, now))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def save_history(router_ip: str, interfaces: list[dict],
+                 system_info: Optional[dict], now: str):
+    """Append one snapshot's worth of rows to the history tables."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        for iface in interfaces:
+            info = iface["info"]
+            clients = iface["clients"]
+            cur.execute(
+                "INSERT INTO interface_history "
+                "(ts, router_ip, interface, num_clients, channel, frequency) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (now, router_ip, iface["device"], len(clients),
+                 info.get("channel"), info.get("frequency")),
+            )
+            for c in clients:
+                if not c["mac"]:
+                    continue
+                cur.execute(
+                    "INSERT INTO client_history "
+                    "(ts, router_ip, interface, mac, signal, rx_rate, tx_rate, "
+                    " rx_bytes, tx_bytes, connected_time) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (now, router_ip, iface["device"], c["mac"],
+                     c["signal"], c["rx_rate"], c["tx_rate"],
+                     c["rx_bytes"], c["tx_bytes"], c["connected_time"]),
+                )
+        if system_info:
+            cur.execute(
+                "INSERT INTO system_metrics "
+                "(ts, router_ip, uptime, load1, load5, load15, "
+                " mem_total, mem_free, mem_used) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (now, router_ip,
+                 system_info.get("uptime"),
+                 system_info.get("load1"), system_info.get("load5"),
+                 system_info.get("load15"),
+                 system_info.get("mem_total"),
+                 system_info.get("mem_free"),
+                 system_info.get("mem_used")),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -252,7 +374,29 @@ async def ubus_call(conn: asyncssh.SSHClientConnection,
         return None
 
 
-async def poll_once(conn: asyncssh.SSHClientConnection, router_ip: str):
+async def fetch_system_info(conn: asyncssh.SSHClientConnection) -> Optional[dict]:
+    """`ubus call system info` → load avg, uptime, memory."""
+    result = await ubus_call(conn, "system", "info")
+    if not result:
+        return None
+    load = result.get("load") or [0, 0, 0]
+    mem = result.get("memory") or {}
+    total = mem.get("total", 0)
+    free = mem.get("free", 0)
+    # OpenWrt reports the 3 load averages as fixed-point: raw / 65536.
+    return {
+        "uptime": result.get("uptime", 0),
+        "load1":  load[0] / 65536.0 if len(load) > 0 else 0.0,
+        "load5":  load[1] / 65536.0 if len(load) > 1 else 0.0,
+        "load15": load[2] / 65536.0 if len(load) > 2 else 0.0,
+        "mem_total": total,
+        "mem_free": free,
+        "mem_used": total - free,
+    }
+
+
+async def poll_once(conn: asyncssh.SSHClientConnection, router_ip: str,
+                    fetch_system: bool = False):
     hostname = router_ip
     try:
         r = await asyncio.wait_for(
@@ -276,20 +420,25 @@ async def poll_once(conn: asyncssh.SSHClientConnection, router_ip: str):
         interfaces.append({"device": dev, "info": info, "clients": clients})
         total_clients += len(clients)
 
+    system_info = await fetch_system_info(conn) if fetch_system else None
+
     save_snapshot(router_ip, hostname, interfaces)
-    return hostname, len(devices), total_clients
+    return hostname, interfaces, system_info, len(devices), total_clients
 
 
 async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
     ssh_key = config.get("ssh_key", "")
     ssh_user = config.get("ssh_user", "root")
     poll_interval = config.get("poll_interval", 10)
+    history_interval = config.get("history_interval", HISTORY_INTERVAL_DEFAULT)
     if not ssh_key:
         logger.error(f"{router_ip}: no ssh_key configured, skipping")
         return
 
     backoff = BACKOFF_INITIAL
     conn: Optional[asyncssh.SSHClientConnection] = None
+    # Force a history write on the very first successful poll.
+    last_history_mono = -float("inf")
 
     while not shutdown.is_set():
         if conn is None:
@@ -317,8 +466,16 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
                 continue
 
         try:
-            host, n_dev, n_cli = await poll_once(conn, router_ip)
+            now_mono = time.monotonic()
+            write_history = (now_mono - last_history_mono) >= history_interval
+            host, interfaces, system_info, n_dev, n_cli = await poll_once(
+                conn, router_ip, fetch_system=write_history
+            )
             logger.info(f"{router_ip} ({host}): {n_cli} clients across {n_dev} ifaces")
+            if write_history:
+                save_history(router_ip, interfaces, system_info,
+                             datetime.now().isoformat())
+                last_history_mono = now_mono
         except (asyncssh.Error, OSError, asyncio.TimeoutError) as e:
             logger.warning(f"{router_ip}: poll failed ({e}); dropping connection")
             try:

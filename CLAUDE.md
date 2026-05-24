@@ -156,12 +156,8 @@ Ordered by **impact / risk**. Don't reorder without good reason — earlier item
 
 ### P2 — Historize the discarded data
 
-8. **New time-series tables:**
-   - `client_history` — `mac`, `router_ip`, `interface`, `signal`, `rx_rate`, `tx_rate`, `rx_bytes`, `tx_bytes`, `connected_time`, `ts` — index `(mac, ts)` and `(router_ip, ts)`.
-   - `interface_history` — `router_ip`, `interface`, `num_clients`, `channel`, `ts`.
-   - `router_status_history` — `router_ip`, `online`, `ts` (write only on transition).
-   - `system_metrics` — `router_ip`, `uptime`, `load1`, `load5`, `load15`, `mem_used`, `mem_total`, `ts`.
-9. **Capture per-router system info** via `ubus call system info` and `ubus call network.device status`. Currently dropped; trivially useful for an ops dashboard.
+8. **New time-series tables.** **Done** — `client_history`, `interface_history`, `router_status_history`, `system_metrics` are created in `init_db()`; the collector appends rows at `history_interval` (default 60s, decoupled from `poll_interval`). `router_status_history` writes only on transition. `system_metrics` captures uptime + load1/5/15 + memory from `ubus call system info`. Retention is **not yet enforced** — that's P3 #12; until then the tables grow.
+9. **Capture per-router system info** via `ubus call system info`. **Done as part of #8** (`load1`, `load5`, `load15`, `uptime`, `mem_total/free/used` in `system_metrics`). `ubus call network.device status` (per-iface byte counters, errors) still TODO if we want it.
 10. **DHCP lease ingestion.** Read `/tmp/dhcp.leases` over SSH every N polls, write to `dhcp_leases` (mac, ip, hostname, expires, router_ip). JOIN on MAC in the clients UI so rows show IP + hostname.
 11. **New page: Clients (cross-router).** One row per known MAC: current AP, signal trend sparkline, total bytes, first/last seen. Filterable, sortable.
 
