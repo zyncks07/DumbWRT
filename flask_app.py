@@ -8,22 +8,28 @@ import os
 import secrets
 import time
 import logging
+import sys
 from datetime import datetime
 from functools import wraps
+
+import auth
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Set explicit template folder
 app = Flask(__name__,
             template_folder='/home/bulik/apps/openwrt-monitor/templates',
             static_folder='/home/bulik/apps/openwrt-monitor/static')
-app.secret_key = secrets.token_hex(32)  # Secure secret key for sessions
 
-# Credentials
-USERNAME = 'admin'
-PASSWORD = 'REDACTED'
+try:
+    app.secret_key = auth.get_secret_key()
+except (FileNotFoundError, KeyError):
+    logger.error(
+        "Auth not configured. Run: sudo python3 "
+        "/home/bulik/apps/openwrt-monitor/scripts/init_auth.py"
+    )
+    sys.exit(1)
 
 DB_PATH = '/var/lib/openwrt-monitor/monitor.db'
 CONFIG_PATH = '/etc/openwrt-monitor/config.json'
@@ -75,7 +81,7 @@ def api_login():
     username = data.get('username')
     password = data.get('password')
     
-    if username == USERNAME and password == PASSWORD:
+    if auth.verify(username, password):
         session['logged_in'] = True
         session.permanent = True
         return jsonify({'success': True})
@@ -186,39 +192,16 @@ def api_config():
                 conn.commit()
                 conn.close()
             
-            # Handle password change if requested
             password_change = data.get('password_change')
             if password_change:
-                current_pw = password_change.get('current')
-                new_pw = password_change.get('new')
-                
-                # Verify current password
-                if current_pw != PASSWORD:
-                    return jsonify({'success': False, 'error': 'Current password is incorrect'}), 401
-                
-                # Update password in this file
-                flask_app_path = '/home/bulik/apps/openwrt-monitor/flask_app.py'
-                try:
-                    with open(flask_app_path, 'r') as f:
-                        content = f.read()
-                    
-                    # Replace password line
-                    content = content.replace(
-                        f"PASSWORD = '{PASSWORD}'",
-                        f"PASSWORD = '{new_pw}'"
-                    )
-                    
-                    with open(flask_app_path, 'w') as f:
-                        f.write(content)
-                    
-                    logger.info("Admin password changed successfully")
-                    
-                    # Clear session to force re-login
-                    session.clear()
-                    
-                except Exception as e:
-                    logger.error(f"Failed to update password: {e}")
-                    return jsonify({'success': False, 'error': 'Failed to update password file'}), 500
+                ok, msg = auth.change_password(
+                    password_change.get('current'),
+                    password_change.get('new'),
+                )
+                if not ok:
+                    return jsonify({'success': False, 'error': msg}), 401
+                logger.info("Admin password changed successfully")
+                session.clear()
             
             # Restart both services to apply changes
             import subprocess

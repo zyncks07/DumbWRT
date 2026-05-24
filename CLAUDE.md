@@ -66,11 +66,13 @@ flask_app.py  (port 5000, session auth)
 templates/*.html  (inline CSS+JS, polls via setInterval)
 ```
 
-### Auth (current state — this is bad and must change)
+### Auth
 
-- Hardcoded `USERNAME = 'admin'` and `PASSWORD = '...'` in the Flask source.
-- Password change endpoint literally rewrites `flask_app.py` on disk (`content.replace(...)`).
-- Session-based, secret key regenerated on every process start (so a restart logs everyone out).
+- Credentials and Flask `secret_key` live in `/etc/openwrt-monitor/auth.json` (mode 600, root-owned).
+- Password is stored as an Argon2id hash (`argon2-cffi` / Debian `python3-argon2`).
+- `auth.py` is the only module that touches the file. `verify()` for login, `change_password()` for rotation from the UI.
+- Bootstrap or reset from the CLI with `sudo python3 scripts/init_auth.py`.
+- `secret_key` is stable across restarts, so sessions survive a service restart.
 
 ### Systemd
 
@@ -130,7 +132,7 @@ Both as `root`, `Restart=always`. Saving config in the UI calls `systemctl resta
 - **Canonical project root is `/home/bulik/apps/openwrt-monitor/`** — moved here from `/var/www/openwrt-monitor/` so the tree is bulik-owned (no sudo or `safe.directory` friction for git or edits) and no longer mixed with the unrelated voucher app. Systemd units now `ExecStart` directly from this tree; there is no `/usr/local/bin/` copy of the Python files to keep in sync.
 - **Git is initialized.** `git init` on the project root with `main` branch and an initial snapshot commit. `.gitignore` excludes the wifi voucher app, `.claude/` state, logs, `*.backup-*`, and secrets.
 - **CDNs in the critical path.** `dashboard.html`, `config.html`, `logs.html` all `<link>` Font Awesome and Google Fonts from public CDNs. The Atom box is intranet-facing — if its uplink drops, the UI stalls. Vendor all assets into `/static/` and remove the `<link>` tags.
-- **Password is rewritten in source on change.** `flask_app.py` ~line 200 does `content.replace(f"PASSWORD = '{PASSWORD}'", f"PASSWORD = '{new_pw}'")` and writes back to `/home/bulik/apps/openwrt-monitor/flask_app.py`. Don't preserve this. P0 #2 replaces it with config-based Argon2 auth.
+- **Auth dies hard if `auth.json` is missing.** `flask_app.py` calls `sys.exit(1)` at import time if `/etc/openwrt-monitor/auth.json` is absent or malformed. This is intentional — there is no fallback to hardcoded credentials. Bootstrap with `sudo python3 scripts/init_auth.py`.
 - **SSH multiplex is already set up.** `/etc/openwrt-monitor/ssh_config` has `ControlMaster auto`, `ControlPersist 10m`, `ServerAliveInterval 30`. Always pass `-F /etc/openwrt-monitor/ssh_config` if you open a raw `ssh` subprocess. (In v2, `asyncssh` replaces the need entirely.)
 - **`clients` table is destructive.** Don't try to query historical client data from it — there isn't any. History goes in the new `*_history` tables (§5 P2).
 - **Threads-per-router doesn't scale.** Today: 30 routers × 2 threads × per-poll `subprocess` fork is the dominant CPU cost. This is *the* reason for the asyncio migration, not aesthetics.
@@ -151,7 +153,7 @@ Ordered by **impact / risk**. Don't reorder without good reason — earlier item
 
 0. **Relocate project tree to `/home/bulik/apps/openwrt-monitor/`** so it is bulik-owned and unmixed from the wifi voucher app. Update `template_folder`/`static_folder` in `flask_app.py` and `WorkingDirectory`/`ExecStart` in the systemd units. **Done.**
 1. **`git init`** at the new project root, `main` branch, initial snapshot commit, `.gitignore`. **Done.**
-2. **Move hardcoded credentials out of `flask_app.py`** into `/etc/openwrt-monitor/auth.json` with an Argon2 hash. Stop the in-place source rewrite.
+2. **Move hardcoded credentials out of `flask_app.py`** into `/etc/openwrt-monitor/auth.json` with an Argon2 hash. Stop the in-place source rewrite. **Done.**
 3. **Vendor Font Awesome + fonts into `/static/`.** Drop every CDN `<link>` from `templates/*.html`.
 4. **logrotate config** for `/var/log/openwrt-collector.log` (e.g. 5 MB × 5 files, `copytruncate`).
 
