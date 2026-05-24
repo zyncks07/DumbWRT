@@ -139,6 +139,8 @@ def api_routers():
 @app.route('/api/router/<router_ip>')
 @login_required
 def api_router_detail(router_ip):
+    import re
+
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('SELECT * FROM interfaces WHERE router_ip = ? ORDER BY interface', (router_ip,))
@@ -152,8 +154,81 @@ def api_router_detail(router_ip):
             ORDER BY c.signal DESC
         """, (router_ip, iface['interface']))
         iface['clients'] = [dict(row) for row in cursor.fetchall()]
+
+    cursor.execute("""
+        SELECT section, ssid, radio, disabled
+        FROM wifi_iface_config
+        WHERE router_ip = ?
+        ORDER BY radio, disabled, ssid
+    """, (router_ip,))
+    configured = [dict(row) for row in cursor.fetchall()]
     conn.close()
-    return jsonify({'success': True, 'router_ip': router_ip, 'interfaces': interfaces})
+
+    # Merge: one entry per configured SSID, joined to its live iwinfo
+    # data when the SSID is currently broadcasting. Match by (radio, ssid):
+    # interface 'phy0-ap*' belongs to 'radio0', 'phy1-ap*' to 'radio1', etc.
+    phy_re = re.compile(r"phy(\d+)")
+    active_by_key = {}
+    for iface in interfaces:
+        m = phy_re.match(iface.get('interface') or '')
+        if not m:
+            continue
+        key = ('radio' + m.group(1), iface.get('ssid') or '')
+        active_by_key[key] = iface
+
+    ssids = []
+    used = set()
+    for c in configured:
+        key = (c.get('radio') or '', c.get('ssid') or '')
+        match = active_by_key.get(key)
+        entry = {
+            'section': c['section'],
+            'ssid': c['ssid'],
+            'radio': c['radio'],
+            'disabled': bool(c['disabled']),
+            'active': bool(match) and not bool(c['disabled']),
+        }
+        if match:
+            used.add(id(match))
+            entry.update({
+                'interface': match.get('interface'),
+                'frequency': match.get('frequency'),
+                'channel': match.get('channel'),
+                'bandwidth': match.get('bandwidth'),
+                'mode': match.get('mode'),
+                'encryption': match.get('encryption'),
+                'num_clients': match.get('num_clients', 0),
+                'clients': match.get('clients', []),
+            })
+        ssids.append(entry)
+
+    # Anything broadcasting that wasn't in UCI (shouldn't normally happen
+    # but guard against it). Tagged active without a section.
+    for iface in interfaces:
+        if id(iface) in used:
+            continue
+        ssids.append({
+            'section': None,
+            'ssid': iface.get('ssid'),
+            'radio': None,
+            'disabled': False,
+            'active': True,
+            'interface': iface.get('interface'),
+            'frequency': iface.get('frequency'),
+            'channel': iface.get('channel'),
+            'bandwidth': iface.get('bandwidth'),
+            'mode': iface.get('mode'),
+            'encryption': iface.get('encryption'),
+            'num_clients': iface.get('num_clients', 0),
+            'clients': iface.get('clients', []),
+        })
+
+    return jsonify({
+        'success': True,
+        'router_ip': router_ip,
+        'interfaces': interfaces,
+        'ssids': ssids,
+    })
 
 @app.route('/api/clients')
 @login_required

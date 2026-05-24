@@ -46,6 +46,8 @@ A web app that monitors WiFi clients across a fleet of OpenWrt routers (currentl
 
 **Important:** the `clients` table is destructive — every poll cycle does `DELETE FROM clients WHERE router_ip=? AND interface=?` and re-inserts. **No history is kept.** That's the single biggest cause of "rich data being discarded" that this project complains about.
 
+`interfaces` and `clients` rows for interfaces no longer present in `iwinfo devices` are deleted per-poll (orphan cleanup added after a disabled wifi-iface produced phantom SSIDs in the UI). `wifi_iface_config` carries the full UCI wifi-iface set (active + disabled) so the dashboard can render a "Disabled" badge for configured-but-off SSIDs alongside the active ones.
+
 ### Data flow
 
 ```

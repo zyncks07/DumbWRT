@@ -142,6 +142,30 @@
             font-weight: 600;
             color: var(--fg);
         }
+        .ssid-badge {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-size: 9px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-left: 8px;
+            vertical-align: middle;
+        }
+        .ssid-badge.active {
+            background: rgba(0, 255, 136, 0.15);
+            color: var(--ok);
+            border: 1px solid var(--accent-2);
+        }
+        .ssid-badge.disabled {
+            background: var(--card-bg-3);
+            color: var(--fg-muted);
+            border: 1px solid var(--border-c);
+        }
+        .interface-card.disabled-card {
+            opacity: 0.6;
+        }
         
         .interface-meta {
             display: flex;
@@ -623,88 +647,116 @@
             fetch(`/api/router/${routerIp}`)
                 .then(res => res.json())
                 .then(data => {
-                    const interfaces = data.interfaces || [];
+                    const ssids = data.ssids || [];
                     const container = document.getElementById(`router-detail-${safeIP}`);
-                    
+
                     if (!container) return; // Router was removed
-                    
-                    if (interfaces.length === 0) {
+
+                    if (ssids.length === 0) {
                         container.innerHTML = '<div class="no-clients">No wireless interfaces found</div>';
                         return;
                     }
 
                     container.innerHTML = `
                         <div class="interfaces-list">
-                            ${interfaces.map(iface => `
-                                <div class="interface-card">
-                                    <div class="interface-header">
-                                        <div>
-                                            <div class="interface-ssid">${iface.ssid || 'Hidden SSID'}</div>
-                                            <div class="interface-name">${iface.interface}</div>
-                                        </div>
-                                        <div style="text-align: right; font-size: 11px; color: var(--fg-muted);">
-                                            <div><strong>${iface.num_clients || 0}</strong> clients</div>
-                                        </div>
-                                    </div>
-                                    <div class="interface-meta">
-                                        <span><i class="fas fa-signal"></i> ${iface.frequency ? (iface.frequency / 1000).toFixed(1) + ' GHz' : 'N/A'}</span>
-                                        <span><i class="fas fa-arrows-alt-h"></i> ${iface.bandwidth || 'N/A'} MHz</span>
-                                        <span><i class="fas fa-broadcast-tower"></i> Ch ${iface.channel || 'N/A'}</span>
-                                        <span><i class="fas fa-lock"></i> ${iface.encryption || 'Open'}</span>
-                                    </div>
-                                    ${(iface.clients && iface.clients.length > 0) ? `
-                                        <table class="clients-table">
-                                            <thead>
-                                                <tr>
-                                                    <th>MAC Address</th>
-                                                    <th>IP / Device</th>
-                                                    <th>Signal</th>
-                                                    <th>RX Rate</th>
-                                                    <th>TX Rate</th>
-                                                    <th>RX/TX Data</th>
-                                                    <th>Connected</th>
-                                                    <th>Inactive</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody>
-                                                ${iface.clients
-                                                    .sort((a, b) => a.mac.localeCompare(b.mac)) // Sort by MAC to prevent jumping
-                                                    .map(client => {
-                                                        const signalPercent = getSignalPercent(client.signal);
-                                                        const signalClass = getSignalClass(client.signal);
-                                                        const ip = client.arp_ip || '';
-                                                        const hostname = client.arp_hostname || '';
-                                                        const ipCell = ip
-                                                          ? (hostname
-                                                              ? `<div style="font-weight:600">${hostname}</div><div style="color:var(--fg-muted);font-size:0.85em">${ip}</div>`
-                                                              : ip)
-                                                          : '<span style="color:var(--fg-muted)">—</span>';
+                            ${ssids.map(s => {
+                                const badge = s.disabled
+                                    ? '<span class="ssid-badge disabled">Disabled</span>'
+                                    : (s.active
+                                        ? '<span class="ssid-badge active">Active</span>'
+                                        : '');
+                                const cardCls = (s.disabled || !s.active) ? 'interface-card disabled-card' : 'interface-card';
+                                const ifaceLabel = s.interface
+                                    ? `${s.interface} · ${s.radio || ''}`
+                                    : (s.radio || '');
+                                const ssidName = s.ssid || 'Hidden SSID';
 
-                                                        return `
-                                                            <tr>
-                                                                <td class="mac-address" onclick="copyMAC('${client.mac}')" style="cursor: pointer;" title="Click to copy">
-                                                                    ${client.mac}
-                                                                </td>
-                                                                <td class="mac-address">${ipCell}</td>
-                                                                <td>
-                                                                    <div class="signal-bar">
-                                                                        <div class="signal-fill ${signalClass}" style="width: ${signalPercent}%"></div>
-                                                                    </div>
-                                                                    ${client.signal} dBm
-                                                                </td>
-                                                                <td class="rate">${formatRate(client.rx_rate)}</td>
-                                                                <td class="rate">${formatRate(client.tx_rate)}</td>
-                                                                <td class="rate">${formatBytes(client.rx_bytes)} / ${formatBytes(client.tx_bytes)}</td>
-                                                                <td>${formatTime(client.connected_time)}</td>
-                                                                <td>${client.inactive ? client.inactive + 's' : 'Active'}</td>
-                                                            </tr>
-                                                        `;
-                                                    }).join('')}
-                                            </tbody>
-                                        </table>
-                                    ` : '<div class="no-clients">No clients connected</div>'}
-                                </div>
-                            `).join('')}
+                                if (!s.active) {
+                                    // Disabled (or configured-but-not-broadcasting) — compact card, no client table.
+                                    return `
+                                        <div class="${cardCls}">
+                                            <div class="interface-header">
+                                                <div>
+                                                    <div class="interface-ssid">${ssidName}${badge}</div>
+                                                    <div class="interface-name">${ifaceLabel}</div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    `;
+                                }
+
+                                const clients = s.clients || [];
+                                return `
+                                    <div class="${cardCls}">
+                                        <div class="interface-header">
+                                            <div>
+                                                <div class="interface-ssid">${ssidName}${badge}</div>
+                                                <div class="interface-name">${ifaceLabel}</div>
+                                            </div>
+                                            <div style="text-align: right; font-size: 11px; color: var(--fg-muted);">
+                                                <div><strong>${s.num_clients || 0}</strong> clients</div>
+                                            </div>
+                                        </div>
+                                        <div class="interface-meta">
+                                            <span><i class="fas fa-signal"></i> ${s.frequency ? (s.frequency / 1000).toFixed(1) + ' GHz' : 'N/A'}</span>
+                                            <span><i class="fas fa-arrows-alt-h"></i> ${s.bandwidth || 'N/A'} MHz</span>
+                                            <span><i class="fas fa-broadcast-tower"></i> Ch ${s.channel || 'N/A'}</span>
+                                            <span><i class="fas fa-lock"></i> ${s.encryption || 'Open'}</span>
+                                        </div>
+                                        ${(clients.length > 0) ? `
+                                            <table class="clients-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th>MAC Address</th>
+                                                        <th>IP / Device</th>
+                                                        <th>Signal</th>
+                                                        <th>RX Rate</th>
+                                                        <th>TX Rate</th>
+                                                        <th>RX/TX Data</th>
+                                                        <th>Connected</th>
+                                                        <th>Inactive</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    ${clients
+                                                        .sort((a, b) => a.mac.localeCompare(b.mac))
+                                                        .map(client => {
+                                                            const signalPercent = getSignalPercent(client.signal);
+                                                            const signalClass = getSignalClass(client.signal);
+                                                            const ip = client.arp_ip || '';
+                                                            const hostname = client.arp_hostname || '';
+                                                            const ipCell = ip
+                                                              ? (hostname
+                                                                  ? `<div style="font-weight:600">${hostname}</div><div style="color:var(--fg-muted);font-size:0.85em">${ip}</div>`
+                                                                  : ip)
+                                                              : '<span style="color:var(--fg-muted)">—</span>';
+
+                                                            return `
+                                                                <tr>
+                                                                    <td class="mac-address" onclick="copyMAC('${client.mac}')" style="cursor: pointer;" title="Click to copy">
+                                                                        ${client.mac}
+                                                                    </td>
+                                                                    <td class="mac-address">${ipCell}</td>
+                                                                    <td>
+                                                                        <div class="signal-bar">
+                                                                            <div class="signal-fill ${signalClass}" style="width: ${signalPercent}%"></div>
+                                                                        </div>
+                                                                        ${client.signal} dBm
+                                                                    </td>
+                                                                    <td class="rate">${formatRate(client.rx_rate)}</td>
+                                                                    <td class="rate">${formatRate(client.tx_rate)}</td>
+                                                                    <td class="rate">${formatBytes(client.rx_bytes)} / ${formatBytes(client.tx_bytes)}</td>
+                                                                    <td>${formatTime(client.connected_time)}</td>
+                                                                    <td>${client.inactive ? client.inactive + 's' : 'Active'}</td>
+                                                                </tr>
+                                                            `;
+                                                        }).join('')}
+                                                </tbody>
+                                            </table>
+                                        ` : '<div class="no-clients">No clients connected</div>'}
+                                    </div>
+                                `;
+                            }).join('')}
                         </div>
                     `;
                 })

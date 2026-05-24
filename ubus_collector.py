@@ -179,6 +179,24 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_arp_ip ON arp_entries(ip)")
 
+    # ---- Configured wifi-iface sections from UCI (active or disabled) ----
+    # Lets the UI surface configured-but-off SSIDs with a "disabled" badge
+    # instead of just omitting them. Section is the UCI section name and
+    # is unique per router.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS wifi_iface_config (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            router_ip TEXT NOT NULL,
+            section TEXT NOT NULL,
+            ssid TEXT,
+            radio TEXT,
+            disabled INTEGER NOT NULL DEFAULT 0,
+            last_updated DATETIME NOT NULL,
+            UNIQUE(router_ip, section)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_wic_router ON wifi_iface_config(router_ip)")
+
     conn.commit()
     conn.close()
 
@@ -232,8 +250,13 @@ def _check_transition(cur, router_ip: str, new_online: int, now: str):
         )
 
 
-def save_snapshot(router_ip: str, hostname: str, interfaces: list[dict]):
-    """Persist one poll's results."""
+def save_snapshot(router_ip: str, hostname: str, interfaces: list[dict],
+                  wifi_config: Optional[list[dict]] = None):
+    """Persist one poll's results.
+
+    `wifi_config` is the parsed UCI wireless config (list of wifi-iface
+    sections including disabled ones). Pass None to leave that table
+    untouched for this poll (e.g. the UCI fetch failed)."""
     now = datetime.now().isoformat()
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -269,6 +292,35 @@ def save_snapshot(router_ip: str, hostname: str, interfaces: list[dict]):
             # No active interfaces at all: clean both tables for this router.
             cur.execute("DELETE FROM clients WHERE router_ip = ?", (router_ip,))
             cur.execute("DELETE FROM interfaces WHERE router_ip = ?", (router_ip,))
+
+        # UCI wifi-iface set — only touch the table if we got a real
+        # response (None means the uci.get call failed; don't nuke).
+        if wifi_config is not None:
+            sections = [w["section"] for w in wifi_config]
+            if sections:
+                ph = ",".join("?" * len(sections))
+                cur.execute(
+                    f"DELETE FROM wifi_iface_config "
+                    f"WHERE router_ip = ? AND section NOT IN ({ph})",
+                    (router_ip, *sections),
+                )
+            else:
+                cur.execute(
+                    "DELETE FROM wifi_iface_config WHERE router_ip = ?",
+                    (router_ip,),
+                )
+            for w in wifi_config:
+                cur.execute("""
+                    INSERT INTO wifi_iface_config
+                        (router_ip, section, ssid, radio, disabled, last_updated)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(router_ip, section) DO UPDATE SET
+                        ssid = excluded.ssid,
+                        radio = excluded.radio,
+                        disabled = excluded.disabled,
+                        last_updated = excluded.last_updated
+                """, (router_ip, w["section"], w["ssid"], w["radio"],
+                      w["disabled"], now))
 
         for iface in interfaces:
             info = iface["info"]
@@ -418,6 +470,29 @@ async def ubus_call(conn: asyncssh.SSHClientConnection,
         return None
 
 
+async def fetch_wifi_config(conn: asyncssh.SSHClientConnection) -> Optional[list[dict]]:
+    """`ubus call uci get '{"config":"wireless"}'` → list of wifi-iface
+    sections including disabled ones. Returns None on failure so callers
+    can distinguish "fetch failed" from "no wifi-iface configured"."""
+    result = await ubus_call(conn, "uci", "get", {"config": "wireless"})
+    if not result:
+        return None
+    values = result.get("values") or {}
+    out: list[dict] = []
+    for section_name, section in values.items():
+        if not isinstance(section, dict):
+            continue
+        if section.get(".type") != "wifi-iface":
+            continue
+        out.append({
+            "section": section.get(".name", section_name),
+            "ssid": section.get("ssid", "") or "",
+            "radio": section.get("device", "") or "",
+            "disabled": 1 if str(section.get("disabled", "0")) == "1" else 0,
+        })
+    return out
+
+
 async def fetch_system_info(conn: asyncssh.SSHClientConnection) -> Optional[dict]:
     """`ubus call system info` → load avg, uptime, memory."""
     result = await ubus_call(conn, "system", "info")
@@ -465,8 +540,9 @@ async def poll_once(conn: asyncssh.SSHClientConnection, router_ip: str,
         total_clients += len(clients)
 
     system_info = await fetch_system_info(conn) if fetch_system else None
+    wifi_config = await fetch_wifi_config(conn)
 
-    save_snapshot(router_ip, hostname, interfaces)
+    save_snapshot(router_ip, hostname, interfaces, wifi_config)
     return hostname, interfaces, system_info, len(devices), total_clients
 
 
