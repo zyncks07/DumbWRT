@@ -248,6 +248,28 @@ def save_snapshot(router_ip: str, hostname: str, interfaces: list[dict]):
                 last_seen=excluded.last_seen
         """, (router_ip, hostname, now, now))
 
+        # Drop interfaces (and their clients) that no longer exist on the
+        # router — e.g. a wifi-iface UCI section was disabled and its
+        # phy*-apN device is gone from `iwinfo devices`. Without this,
+        # the old rows linger forever and the UI shows phantom SSIDs.
+        active = [iface["device"] for iface in interfaces]
+        if active:
+            placeholders = ",".join("?" * len(active))
+            cur.execute(
+                f"DELETE FROM clients "
+                f"WHERE router_ip = ? AND interface NOT IN ({placeholders})",
+                (router_ip, *active),
+            )
+            cur.execute(
+                f"DELETE FROM interfaces "
+                f"WHERE router_ip = ? AND interface NOT IN ({placeholders})",
+                (router_ip, *active),
+            )
+        else:
+            # No active interfaces at all: clean both tables for this router.
+            cur.execute("DELETE FROM clients WHERE router_ip = ?", (router_ip,))
+            cur.execute("DELETE FROM interfaces WHERE router_ip = ?", (router_ip,))
+
         for iface in interfaces:
             info = iface["info"]
             clients = iface["clients"]
