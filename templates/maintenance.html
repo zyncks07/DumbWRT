@@ -141,6 +141,78 @@
         .toast.show { opacity: 1; }
         .toast.ok { border-color: var(--accent-2); }
         .toast.err { border-color: #ff6b6b; }
+
+        .backup-list {
+            margin-top: 12px;
+            max-height: 280px;
+            overflow-y: auto;
+            border: 1px solid var(--border-c);
+            border-radius: 6px;
+        }
+        .backup-row {
+            display: grid;
+            grid-template-columns: 1fr 90px 160px 90px 80px;
+            gap: 10px;
+            align-items: center;
+            padding: 8px 12px;
+            font-size: 12px;
+            border-bottom: 1px solid var(--border-d);
+        }
+        .backup-row:last-child { border-bottom: none; }
+        .backup-row .name {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .backup-row .size, .backup-row .when {
+            font-variant-numeric: tabular-nums;
+            color: var(--fg-muted);
+        }
+        .backup-row .when { font-size: 11px; }
+        .backup-row a.dl, .backup-row button.del {
+            background: transparent;
+            border: 1px solid var(--border-b);
+            color: var(--fg);
+            padding: 5px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            cursor: pointer;
+            text-decoration: none;
+            text-align: center;
+            font-family: inherit;
+        }
+        .backup-row a.dl:hover {
+            background: var(--accent); color: var(--bg-0); border-color: var(--accent);
+        }
+        .backup-row button.del:hover {
+            background: var(--err); border-color: var(--err); color: var(--bg-0);
+        }
+        .backup-empty {
+            padding: 18px;
+            text-align: center;
+            color: var(--fg-muted);
+            font-size: 11px;
+        }
+        .restore-hint {
+            margin-top: 12px;
+            padding: 10px 12px;
+            background: var(--card-bg-3);
+            border: 1px solid var(--border-c);
+            border-radius: 6px;
+            font-size: 11px;
+            color: var(--fg-muted);
+            line-height: 1.6;
+        }
+        .restore-hint code {
+            background: var(--card-bg-2);
+            padding: 1px 5px;
+            border-radius: 3px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: var(--fg);
+        }
     </style>
 </head>
 <body>
@@ -209,6 +281,28 @@
         <div class="status-row"><span class="k">system_metrics rows</span><span class="v" id="sz-sm">—</span></div>
     </div>
 
+    <div class="card" style="grid-column: 1 / -1;">
+        <h2 style="justify-content: space-between; display:flex;">
+            <span><i class="fas fa-floppy-disk"></i> Backups</span>
+            <button class="btn primary" id="backupNow">
+                <i class="fas fa-camera"></i> Backup now
+            </button>
+        </h2>
+        <div class="field">
+            <label for="bkeep">Keep backups for</label>
+            <input type="number" id="bkeep" min="1" max="3650" value="7">
+            <span style="color:var(--fg-muted)">days</span>
+        </div>
+        <div class="backup-list" id="backupList">
+            <div class="backup-empty">Loading…</div>
+        </div>
+        <div class="restore-hint">
+            <strong>Restoring:</strong> download the desired backup, then stop services,
+            replace <code>/var/lib/openwrt-monitor/monitor.db</code>, and start services —
+            <code>sudo systemctl stop openwrt-collector openwrt-dashboard &amp;&amp; sudo cp &lt;backup&gt; /var/lib/openwrt-monitor/monitor.db &amp;&amp; sudo systemctl start openwrt-collector openwrt-dashboard</code>.
+        </div>
+    </div>
+
     <div style="grid-column: 1 / -1; display:flex; justify-content:flex-end;">
         <button class="btn primary" id="saveBtn">
             <i class="fas fa-save"></i> Save settings
@@ -237,6 +331,12 @@ function fmtBytes(n) {
     return (n / 1073741824).toFixed(2) + ' GB';
 }
 
+function fmtWhen(iso) {
+    if (!iso) return '—';
+    try { return new Date(iso).toLocaleString(); }
+    catch (_) { return iso; }
+}
+
 async function load() {
     const r = await fetch('/api/maintenance');
     const d = await r.json();
@@ -257,12 +357,51 @@ async function load() {
     $('sz-ih').textContent = z.interface_history.toLocaleString();
     $('sz-rh').textContent = z.router_status_history.toLocaleString();
     $('sz-sm').textContent = z.system_metrics.toLocaleString();
+
+    await loadBackups();
+}
+
+async function loadBackups() {
+    try {
+        const r = await fetch('/api/maintenance/backups');
+        const d = await r.json();
+        if (!d.success) throw new Error(d.error || 'fetch failed');
+        $('bkeep').value = d.keep_days;
+        const list = $('backupList');
+        if (!d.backups.length) {
+            list.innerHTML = '<div class="backup-empty">No backups yet. Click <em>Backup now</em> to create one.</div>';
+            return;
+        }
+        list.innerHTML = d.backups.map(b => `
+            <div class="backup-row" data-name="${b.name}">
+                <span class="name" title="${b.name}">${b.name}</span>
+                <span class="size">${fmtBytes(b.bytes)}</span>
+                <span class="when">${fmtWhen(b.mtime)}</span>
+                <a class="dl" href="/api/maintenance/backup/download/${encodeURIComponent(b.name)}">Download</a>
+                <button class="del" type="button">Delete</button>
+            </div>
+        `).join('');
+        list.querySelectorAll('.backup-row .del').forEach(btn => {
+            btn.addEventListener('click', async (ev) => {
+                const row = ev.target.closest('.backup-row');
+                const name = row.dataset.name;
+                if (!confirm(`Delete ${name}?`)) return;
+                const r2 = await fetch('/api/maintenance/backup/' + encodeURIComponent(name), {method: 'DELETE'});
+                const d2 = await r2.json();
+                if (d2.success) { toast('Deleted', 'ok'); loadBackups(); }
+                else toast(d2.error || 'Delete failed', 'err');
+            });
+        });
+    } catch (e) {
+        $('backupList').innerHTML = '<div class="backup-empty">Failed to load backups.</div>';
+    }
 }
 
 $('saveBtn').addEventListener('click', async () => {
     const body = {
         history_retention_days: parseInt($('retention').value, 10),
         raw_log_lines: parseInt($('loglines').value, 10),
+        backup_keep_days: parseInt($('bkeep').value, 10),
     };
     const r = await fetch('/api/maintenance', {
         method: 'POST',
@@ -275,6 +414,26 @@ $('saveBtn').addEventListener('click', async () => {
         load();
     } else {
         toast(d.error || 'Save failed', 'err');
+    }
+});
+
+$('backupNow').addEventListener('click', async () => {
+    const btn = $('backupNow');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Backing up…';
+    try {
+        const r = await fetch('/api/maintenance/backup/run', {method: 'POST'});
+        const d = await r.json();
+        if (d.success) {
+            toast(d.result.message, 'ok');
+            loadBackups();
+            load();  // refresh DB size too
+        } else {
+            toast(d.error || 'Backup failed', 'err');
+        }
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-camera"></i> Backup now';
     }
 });
 

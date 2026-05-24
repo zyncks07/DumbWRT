@@ -21,6 +21,7 @@ from typing import Optional
 
 import asyncssh
 
+import backup
 import pfsense
 import retention
 
@@ -584,6 +585,26 @@ async def arp_loop(shutdown: asyncio.Event):
             pass
 
 
+async def backup_loop(shutdown: asyncio.Event):
+    """Daily SQLite snapshot + prune. Re-reads config each cycle so
+    `backup_keep_days` changes take effect on the next run."""
+    while not shutdown.is_set():
+        try:
+            cfg = load_config()
+            keep = int(cfg.get("backup_keep_days", backup.DEFAULT_KEEP_DAYS))
+            await asyncio.to_thread(backup.run_backup)
+            await asyncio.to_thread(backup.prune_backups, keep)
+        except Exception as e:
+            logger.error(f"backup loop: {e}", exc_info=True)
+        try:
+            await asyncio.wait_for(
+                shutdown.wait(), timeout=backup.BACKUP_INTERVAL_SECONDS
+            )
+            break
+        except asyncio.TimeoutError:
+            pass
+
+
 async def retention_loop(shutdown: asyncio.Event):
     """Daily history cleanup. Re-reads config each cycle for live changes."""
     while not shutdown.is_set():
@@ -625,6 +646,7 @@ async def main():
     ]
     tasks.append(asyncio.create_task(retention_loop(shutdown), name="retention"))
     tasks.append(asyncio.create_task(arp_loop(shutdown), name="pfsense-arp"))
+    tasks.append(asyncio.create_task(backup_loop(shutdown), name="backup"))
     await shutdown.wait()
     logger.info("Shutdown signaled; cancelling tasks")
     for t in tasks:

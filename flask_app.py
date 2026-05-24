@@ -13,6 +13,7 @@ from datetime import datetime
 from functools import wraps
 
 import auth
+import backup
 import retention
 
 # Configure logging
@@ -563,22 +564,27 @@ def api_maintenance():
             'sizes': retention.get_history_size(),
         })
 
-    # POST: update only the two maintenance keys; preserve everything else.
+    # POST: update only the maintenance keys; preserve everything else.
     data = request.json or {}
     try:
         days = int(data.get('history_retention_days', config.get(
             'history_retention_days', retention.DEFAULT_RETENTION_DAYS)))
         lines = int(data.get('raw_log_lines', config.get(
             'raw_log_lines', retention.DEFAULT_RAW_LOG_LINES)))
+        bdays = int(data.get('backup_keep_days', config.get(
+            'backup_keep_days', backup.DEFAULT_KEEP_DAYS)))
     except (TypeError, ValueError):
         return jsonify({'success': False, 'error': 'days and lines must be integers'}), 400
     if days < 1 or days > 3650:
         return jsonify({'success': False, 'error': 'history_retention_days out of range (1–3650)'}), 400
     if lines < 10 or lines > 100000:
         return jsonify({'success': False, 'error': 'raw_log_lines out of range (10–100000)'}), 400
+    if bdays < 1 or bdays > 3650:
+        return jsonify({'success': False, 'error': 'backup_keep_days out of range (1–3650)'}), 400
 
     config['history_retention_days'] = days
     config['raw_log_lines'] = lines
+    config['backup_keep_days'] = bdays
     save_config(config)
     # No service restart needed — collector re-reads the value each cycle,
     # Flask reads raw_log_lines per request.
@@ -596,6 +602,61 @@ def api_maintenance_run_now():
         logger.error(f"manual cleanup failed: {e}", exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
     return jsonify({'success': True, 'result': result})
+
+
+@app.route('/api/maintenance/backups')
+@login_required
+def api_backups_list():
+    return jsonify({
+        'success': True,
+        'backups': backup.list_backups(),
+        'keep_days': int(load_config().get(
+            'backup_keep_days', backup.DEFAULT_KEEP_DAYS)),
+    })
+
+
+@app.route('/api/maintenance/backup/run', methods=['POST'])
+@login_required
+def api_backup_run():
+    result = backup.run_backup()
+    if not result['ok']:
+        return jsonify({'success': False, 'error': result['message']}), 500
+    # Apply current retention policy after creating a new one.
+    try:
+        keep = int(load_config().get(
+            'backup_keep_days', backup.DEFAULT_KEEP_DAYS))
+        backup.prune_backups(keep)
+    except Exception as e:
+        logger.warning(f"post-backup prune failed: {e}")
+    return jsonify({'success': True, 'result': result})
+
+
+@app.route('/api/maintenance/backup/download/<path:name>')
+@login_required
+def api_backup_download(name):
+    try:
+        p = backup.safe_backup_path(name)
+    except (ValueError, FileNotFoundError):
+        return jsonify({'success': False, 'error': 'invalid backup name'}), 400
+    from flask import send_file
+    return send_file(
+        str(p), as_attachment=True, download_name=name,
+        mimetype='application/octet-stream',
+    )
+
+
+@app.route('/api/maintenance/backup/<path:name>', methods=['DELETE'])
+@login_required
+def api_backup_delete(name):
+    try:
+        p = backup.safe_backup_path(name)
+    except (ValueError, FileNotFoundError):
+        return jsonify({'success': False, 'error': 'invalid backup name'}), 400
+    try:
+        p.unlink()
+    except OSError as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+    return jsonify({'success': True})
 
 
 if __name__ == '__main__':
