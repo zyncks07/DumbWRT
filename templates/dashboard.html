@@ -5,21 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenWrt Monitor Dashboard</title>
     <link rel="stylesheet" href="/static/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/static/theme.css">
+    <script>(function(){try{var t=localStorage.getItem('theme');var d=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.setAttribute('data-theme',t||(d?'dark':'light'))}catch(e){}})();</script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #0a0e27 0%, #0d1117 100%);
-            color: #e8eaed;
+            background: linear-gradient(135deg, var(--bg-0) 0%, var(--bg-1) 100%);
+            color: var(--fg);
             min-height: 100vh;
             padding: 12px;
             font-size: 12px;
         }
         
         .header {
-            background: rgba(26, 34, 56, 0.95);
-            border: 1px solid rgba(0, 212, 255, 0.2);
+            background: var(--card-bg);
+            border: 1px solid var(--border-a);
             border-radius: 10px;
             padding: 12px 20px;
             margin-bottom: 12px;
@@ -30,7 +32,7 @@
         
         .header h1 {
             font-size: 18px;
-            background: linear-gradient(135deg, #00d4ff, #00ff88);
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             display: flex;
@@ -46,14 +48,14 @@
         
         .last-update {
             font-size: 10px;
-            color: #9aa0a6;
+            color: var(--fg-muted);
             margin-right: 12px;
         }
         
         .btn {
-            background: rgba(26, 34, 56, 0.95);
-            border: 1px solid rgba(0, 212, 255, 0.3);
-            color: #e8eaed;
+            background: var(--card-bg);
+            border: 1px solid var(--border-b);
+            color: var(--fg);
             padding: 7px 14px;
             border-radius: 6px;
             text-decoration: none;
@@ -66,9 +68,9 @@
         }
         
         .btn:hover {
-            background: #00d4ff;
-            border-color: #00d4ff;
-            color: #0a0e27;
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--bg-0);
             transform: translateY(-1px);
         }
         
@@ -80,8 +82,8 @@
         }
         
         .stat-card {
-            background: rgba(26, 34, 56, 0.95);
-            border: 1px solid rgba(0, 212, 255, 0.2);
+            background: var(--card-bg);
+            border: 1px solid var(--border-a);
             border-radius: 8px;
             padding: 12px;
             display: flex;
@@ -91,7 +93,7 @@
         
         .stat-label {
             font-size: 9px;
-            color: #9aa0a6;
+            color: var(--fg-muted);
             text-transform: uppercase;
             letter-spacing: 0.5px;
             font-weight: 600;
@@ -100,7 +102,7 @@
         .stat-value {
             font-size: 24px;
             font-weight: 700;
-            background: linear-gradient(135deg, #00d4ff, #00ff88);
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
@@ -116,8 +118,8 @@
         }
         
         .router-card {
-            background: rgba(26, 34, 56, 0.95);
-            border: 1px solid rgba(0, 212, 255, 0.2);
+            background: var(--card-bg);
+            border: 1px solid var(--border-a);
             border-radius: 8px;
             overflow: hidden;
             transition: all 0.3s;
@@ -138,7 +140,7 @@
         }
         
         .router-header:hover {
-            background: rgba(0, 212, 255, 0.05);
+            background: var(--border-d);
         }
         
         .router-info {
@@ -151,13 +153,13 @@
             width: 10px;
             height: 10px;
             border-radius: 50%;
-            background: #00ff88;
+            background: var(--accent-2);
             box-shadow: 0 0 8px rgba(0, 255, 136, 0.5);
             animation: pulse 2s infinite;
         }
         
         .router-status.offline {
-            background: #ff4757;
+            background: var(--err);
             box-shadow: 0 0 8px rgba(255, 71, 87, 0.5);
             animation: none;
         }
@@ -170,12 +172,12 @@
         .router-name {
             font-size: 14px;
             font-weight: 600;
-            color: #00d4ff;
+            color: var(--accent);
         }
         
         .router-ip {
             font-size: 10px;
-            color: #9aa0a6;
+            color: var(--fg-muted);
             font-family: 'Courier New', monospace;
         }
         
@@ -192,12 +194,12 @@
         .router-stat-value {
             font-size: 16px;
             font-weight: 700;
-            color: #00d4ff;
+            color: var(--accent);
         }
         
         .router-stat-label {
             font-size: 8px;
-            color: #9aa0a6;
+            color: var(--fg-muted);
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
@@ -217,8 +219,8 @@
         }
         
         .interface-card {
-            background: rgba(10, 14, 39, 0.7);
-            border: 1px solid rgba(0, 212, 255, 0.1);
+            background: var(--card-bg-3);
+            border: 1px solid var(--border-c);
             border-radius: 6px;
             padding: 10px;
             margin-bottom: 10px;
@@ -234,21 +236,21 @@
         .interface-name {
             font-size: 11px;
             font-weight: 600;
-            color: #00ff88;
+            color: var(--accent-2);
             font-family: 'Courier New', monospace;
         }
         
         .interface-ssid {
             font-size: 12px;
             font-weight: 600;
-            color: #e8eaed;
+            color: var(--fg);
         }
         
         .interface-meta {
             display: flex;
             gap: 12px;
             font-size: 10px;
-            color: #9aa0a6;
+            color: var(--fg-muted);
             margin-bottom: 10px;
         }
         
@@ -261,8 +263,8 @@
         .clients-table th {
             text-align: left;
             padding: 6px;
-            background: rgba(0, 212, 255, 0.1);
-            color: #9aa0a6;
+            background: var(--border-c);
+            color: var(--fg-muted);
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.5px;
@@ -271,16 +273,16 @@
         
         .clients-table td {
             padding: 8px 6px;
-            border-top: 1px solid rgba(0, 212, 255, 0.1);
+            border-top: 1px solid var(--border-c);
         }
         
         .clients-table tr:hover {
-            background: rgba(0, 212, 255, 0.05);
+            background: var(--border-d);
         }
         
         .mac-address {
             font-family: 'Courier New', monospace;
-            color: #00d4ff;
+            color: var(--accent);
             font-size: 10px;
         }
         
@@ -301,32 +303,32 @@
             transition: all 0.3s;
         }
         
-        .signal-excellent { background: linear-gradient(90deg, #00ff88, #00d4ff); }
-        .signal-good { background: linear-gradient(90deg, #ffd93d, #00ff88); }
+        .signal-excellent { background: linear-gradient(90deg, var(--accent-2), var(--accent)); }
+        .signal-good { background: linear-gradient(90deg, #ffd93d, var(--accent-2)); }
         .signal-fair { background: linear-gradient(90deg, #ffb830, #ffd93d); }
-        .signal-poor { background: linear-gradient(90deg, #ff4757, #ffb830); }
+        .signal-poor { background: linear-gradient(90deg, var(--err), #ffb830); }
         
         .rate {
             font-family: 'Courier New', monospace;
-            color: #e8eaed;
+            color: var(--fg);
         }
         
         .no-clients {
             text-align: center;
             padding: 20px;
-            color: #9aa0a6;
+            color: var(--fg-muted);
             font-size: 11px;
         }
         
         .loading {
             text-align: center;
             padding: 40px;
-            color: #9aa0a6;
+            color: var(--fg-muted);
         }
         
         .spinner {
             border: 3px solid rgba(255, 255, 255, 0.1);
-            border-top: 3px solid #00d4ff;
+            border-top: 3px solid var(--accent);
             border-radius: 50%;
             width: 30px;
             height: 30px;
@@ -369,6 +371,7 @@
                 <i class="fas fa-database"></i>
                 Maintenance
             </a>
+            <button id="themeToggle" class="btn" title="Toggle theme" aria-label="Toggle theme"></button>
             <a href="/logout" class="btn">
                 <i class="fas fa-sign-out-alt"></i>
                 Logout
@@ -475,10 +478,10 @@
                 const element = event.target;
                 const originalText = element.textContent;
                 element.textContent = '✓ Copied!';
-                element.style.color = '#00ff88';
+                element.style.color = 'var(--accent-2)';
                 setTimeout(() => {
                     element.textContent = originalText;
-                    element.style.color = '#00d4ff';
+                    element.style.color = 'var(--accent)';
                 }, 1000);
             } catch (error) {
                 console.error('Error copying MAC:', error);
@@ -563,7 +566,7 @@
                                                 <div class="router-stat-value">${router.total_clients || 0}</div>
                                                 <div class="router-stat-label">Clients</div>
                                             </div>
-                                            <i class="fas fa-chevron-down expand-icon ${isExpanded ? 'rotated' : ''}" style="color: #00d4ff;"></i>
+                                            <i class="fas fa-chevron-down expand-icon ${isExpanded ? 'rotated' : ''}" style="color: var(--accent);"></i>
                                         </div>
                                     </div>
                                     <div class="router-content ${isExpanded ? 'expanded' : ''}" id="router-content-${safeIP}">
@@ -653,7 +656,7 @@
                                             <div class="interface-ssid">${iface.ssid || 'Hidden SSID'}</div>
                                             <div class="interface-name">${iface.interface}</div>
                                         </div>
-                                        <div style="text-align: right; font-size: 11px; color: #9aa0a6;">
+                                        <div style="text-align: right; font-size: 11px; color: var(--fg-muted);">
                                             <div><strong>${iface.num_clients || 0}</strong> clients</div>
                                         </div>
                                     </div>
@@ -748,5 +751,6 @@
             updateStats();
         }, 10000);
     </script>
+    <script src="/static/theme.js"></script>
 </body>
 </html>

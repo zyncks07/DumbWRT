@@ -5,21 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Raw Logs - OpenWrt Monitor</title>
     <link rel="stylesheet" href="/static/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/static/theme.css">
+    <script>(function(){try{var t=localStorage.getItem('theme');var d=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.setAttribute('data-theme',t||(d?'dark':'light'))}catch(e){}})();</script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body {
             font-family: 'Courier New', monospace;
-            background: #0a0e27;
-            color: #e8eaed;
+            background: var(--bg-0);
+            color: var(--fg);
             padding: 12px;
             min-height: 100vh;
             font-size: 11px;
         }
         
         .header {
-            background: rgba(26, 34, 56, 0.95);
-            border: 1px solid rgba(0, 212, 255, 0.2);
+            background: var(--card-bg);
+            border: 1px solid var(--border-a);
             border-radius: 10px;
             padding: 12px 20px;
             margin-bottom: 12px;
@@ -30,7 +32,7 @@
         
         .header h1 {
             font-size: 18px;
-            background: linear-gradient(135deg, #00d4ff, #00ff88);
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             display: flex;
@@ -45,9 +47,9 @@
         }
         
         .btn {
-            background: rgba(26, 34, 56, 0.95);
-            border: 1px solid rgba(0, 212, 255, 0.3);
-            color: #e8eaed;
+            background: var(--card-bg);
+            border: 1px solid var(--border-b);
+            color: var(--fg);
             padding: 7px 14px;
             border-radius: 6px;
             text-decoration: none;
@@ -61,15 +63,15 @@
         }
         
         .btn:hover {
-            background: #00d4ff;
-            border-color: #00d4ff;
-            color: #0a0e27;
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--bg-0);
             transform: translateY(-1px);
         }
         
         .controls {
-            background: rgba(26, 34, 56, 0.95);
-            border: 1px solid rgba(0, 212, 255, 0.2);
+            background: var(--card-bg);
+            border: 1px solid var(--border-a);
             border-radius: 10px;
             padding: 12px 20px;
             margin-bottom: 12px;
@@ -87,7 +89,7 @@
         
         .control-label {
             font-size: 10px;
-            color: #9aa0a6;
+            color: var(--fg-muted);
             text-transform: uppercase;
             letter-spacing: 0.5px;
             font-weight: 600;
@@ -95,11 +97,11 @@
         }
         
         .control-input {
-            background: rgba(10, 14, 39, 0.7);
-            border: 2px solid rgba(0, 212, 255, 0.2);
+            background: var(--card-bg-3);
+            border: 2px solid var(--border-a);
             border-radius: 6px;
             padding: 6px 10px;
-            color: #e8eaed;
+            color: var(--fg);
             font-size: 11px;
             font-family: 'Courier New', monospace;
             width: 80px;
@@ -107,49 +109,49 @@
         
         .control-input:focus {
             outline: none;
-            border-color: #00d4ff;
+            border-color: var(--accent);
         }
         
         .control-select {
-            background: rgba(10, 14, 39, 0.7);
-            border: 2px solid rgba(0, 212, 255, 0.2);
+            background: var(--card-bg-3);
+            border: 2px solid var(--border-a);
             border-radius: 6px;
             padding: 6px 10px;
-            color: #e8eaed;
+            color: var(--fg);
             font-size: 11px;
             font-family: 'Courier New', monospace;
         }
         
         .control-select:focus {
             outline: none;
-            border-color: #00d4ff;
+            border-color: var(--accent);
         }
         
         .btn-toggle {
-            background: rgba(0, 212, 255, 0.2);
-            border: 1px solid rgba(0, 212, 255, 0.3);
-            color: #00d4ff;
+            background: var(--border-a);
+            border: 1px solid var(--border-b);
+            color: var(--accent);
         }
         
         .btn-toggle.active {
-            background: #00d4ff;
-            color: #0a0e27;
+            background: var(--accent);
+            color: var(--bg-0);
         }
         
         .btn-clear {
             background: rgba(255, 71, 87, 0.2);
             border: 1px solid rgba(255, 71, 87, 0.3);
-            color: #ff4757;
+            color: var(--err);
         }
         
         .btn-clear:hover {
-            background: #ff4757;
-            color: #0a0e27;
+            background: var(--err);
+            color: var(--bg-0);
         }
         
         .status-bar {
-            background: rgba(26, 34, 56, 0.95);
-            border: 1px solid rgba(0, 212, 255, 0.2);
+            background: var(--card-bg);
+            border: 1px solid var(--border-a);
             border-radius: 10px;
             padding: 8px 20px;
             margin-bottom: 12px;
@@ -157,7 +159,7 @@
             justify-content: space-between;
             align-items: center;
             font-size: 10px;
-            color: #9aa0a6;
+            color: var(--fg-muted);
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         }
         
@@ -171,7 +173,7 @@
             width: 8px;
             height: 8px;
             border-radius: 50%;
-            background: #00ff88;
+            background: var(--accent-2);
             animation: pulse 2s infinite;
         }
         
@@ -181,8 +183,8 @@
         }
         
         .tabs {
-            background: rgba(26, 34, 56, 0.95);
-            border: 1px solid rgba(0, 212, 255, 0.2);
+            background: var(--card-bg);
+            border: 1px solid var(--border-a);
             border-radius: 10px 10px 0 0;
             padding: 8px 20px;
             display: flex;
@@ -197,23 +199,23 @@
             font-size: 11px;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: rgba(10, 14, 39, 0.5);
-            color: #9aa0a6;
+            color: var(--fg-muted);
         }
         
         .tab:hover {
-            background: rgba(0, 212, 255, 0.1);
-            color: #00d4ff;
+            background: var(--border-c);
+            color: var(--accent);
         }
         
         .tab.active {
-            background: rgba(0, 212, 255, 0.2);
-            color: #00d4ff;
-            border: 1px solid rgba(0, 212, 255, 0.3);
+            background: var(--border-a);
+            color: var(--accent);
+            border: 1px solid var(--border-b);
         }
         
         .log-container {
-            background: #0a0e27;
-            border: 1px solid rgba(0, 212, 255, 0.2);
+            background: var(--bg-0);
+            border: 1px solid var(--border-a);
             border-top: none;
             border-radius: 0 0 10px 10px;
             padding: 15px;
@@ -235,58 +237,58 @@
         }
         
         .log-entry:hover {
-            background: rgba(0, 212, 255, 0.05);
+            background: var(--border-d);
         }
         
         .log-entry.error {
-            border-left-color: #ff4757;
+            border-left-color: var(--err);
             color: #ff9999;
         }
         
         .log-entry.warning {
-            border-left-color: #ffb800;
+            border-left-color: var(--warn);
             color: #ffd966;
         }
         
         .log-entry.info {
-            border-left-color: #00d4ff;
+            border-left-color: var(--accent);
             color: #b3e5fc;
         }
         
         .log-entry.success {
-            border-left-color: #00ff88;
+            border-left-color: var(--accent-2);
             color: #b3ffcc;
         }
         
         .log-timestamp {
-            color: #9aa0a6;
+            color: var(--fg-muted);
             margin-right: 6px;
             font-size: 9px;
         }
         
         .log-level {
-            color: #00d4ff;
+            color: var(--accent);
             margin-right: 6px;
             font-weight: bold;
             font-size: 9px;
         }
         
         .log-router {
-            color: #00ff88;
+            color: var(--accent-2);
             margin-right: 6px;
             font-size: 9px;
         }
         
         .log-entry.header {
-            border-left-color: #00d4ff;
-            color: #00d4ff;
+            border-left-color: var(--accent);
+            color: var(--accent);
             font-weight: bold;
-            background: rgba(0, 212, 255, 0.05);
+            background: var(--border-d);
         }
         
         .raw-json {
-            background: rgba(10, 14, 39, 0.7);
-            border: 1px solid rgba(0, 212, 255, 0.2);
+            background: var(--card-bg-3);
+            border: 1px solid var(--border-a);
             border-radius: 6px;
             padding: 8px;
             margin: 4px 0;
@@ -296,26 +298,26 @@
         }
         
         .json-key {
-            color: #00d4ff;
+            color: var(--accent);
         }
         
         .json-string {
-            color: #00ff88;
+            color: var(--accent-2);
         }
         
         .json-number {
-            color: #ffb800;
+            color: var(--warn);
         }
         
         .loading {
             text-align: center;
             padding: 40px;
-            color: #9aa0a6;
+            color: var(--fg-muted);
         }
         
         .spinner {
             border: 3px solid rgba(255, 255, 255, 0.1);
-            border-top: 3px solid #00d4ff;
+            border-top: 3px solid var(--accent);
             border-radius: 50%;
             width: 30px;
             height: 30px;
@@ -348,6 +350,7 @@
                 <i class="fas fa-database"></i>
                 Maintenance
             </a>
+            <button id="themeToggle" class="btn" title="Toggle theme" aria-label="Toggle theme"></button>
         </div>
     </div>
 
@@ -508,7 +511,7 @@
                                 jsonBuffer = '';
                                 inJson = false;
                             }
-                            formatted += `<div style="color: #00d4ff; font-weight: bold; margin-top: 8px;">${line}</div>`;
+                            formatted += `<div style="color: var(--accent); font-weight: bold; margin-top: 8px;">${line}</div>`;
                         } else if (line.trim().startsWith('{')) {
                             inJson = true;
                             jsonBuffer = line;
@@ -634,5 +637,6 @@
         loadRouters();
         startAutoRefresh();
     </script>
+    <script src="/static/theme.js"></script>
 </body>
 </html>

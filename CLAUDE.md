@@ -174,7 +174,7 @@ Ordered by **impact / risk**. Don't reorder without good reason — earlier item
 
 ### P4 — UI overhaul (info density + theme)
 
-15. **Light/dark theme via CSS custom properties** on `<html data-theme="light|dark">`. Persist in `localStorage`. Default = `prefers-color-scheme`. Toggle in the header.
+15. **Light/dark theme via CSS custom properties** on `<html data-theme="light|dark">`. Persist in `localStorage`. Default = `prefers-color-scheme`. Toggle in the header. **Done** — tokens in `static/theme.css`, toggle + FOUC handling in `static/theme.js` (plus a tiny inline pre-render script in each template's `<head>`). All templates' inline CSS now uses `var(--accent)` / `var(--fg)` / `var(--card-bg)` / etc. Toggle button (`#themeToggle`) is in every nav except login.html. A handful of subtle tints (rgba shadows on err/warn/ok buttons) remain hardcoded — fine in both modes, not worth chasing.
 16. **Dense router grid.** Replace today's 1-card-per-router stack with a single-row layout: status dot + hostname + IP + total clients + 2.4 GHz / 5 GHz badges + load + uptime. Click to expand client list inline. **Target: 30 routers visible without scrolling on 1080p.**
 17. **Sortable / filterable clients table.** By signal, by router, by SSID, by inactive time. Virtualize rows so 200+ clients render without jank on the Atom.
 18. **Drop chart.js everywhere it appears.** If the monitor needs charts, use **uPlot** (~40 KB) or hand-rolled SVG sparklines. No more 250 KB chart libraries.

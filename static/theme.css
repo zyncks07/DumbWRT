@@ -1,0 +1,64 @@
+/* OpenWrt Monitor theme tokens (CLAUDE.md §6).
+ * Dark is the default; light is opt-in via <html data-theme="light">.
+ * The inline FOUC-prevention script in each template's <head>
+ * sets data-theme before paint based on localStorage / system pref.
+ */
+
+:root {
+    /* Surfaces */
+    --bg-0: #0a0e27;
+    --bg-1: #0d1117;
+    --bg-gradient: linear-gradient(135deg, var(--bg-0) 0%, var(--bg-1) 100%);
+    --card-bg:   rgba(26, 34, 56, 0.95);
+    --card-bg-2: rgba(13, 17, 23, 0.8);
+    --card-bg-3: rgba(10, 14, 39, 0.7);
+
+    /* Text */
+    --fg: #e8eaed;
+    --fg-muted: #9aa0a6;
+
+    /* Accents */
+    --accent: #00d4ff;
+    --accent-2: #00ff88;
+    --accent-gradient: linear-gradient(135deg, var(--accent), var(--accent-2));
+
+    /* Borders (cyan-tinted overlays) */
+    --border-a: rgba(0, 212, 255, 0.2);
+    --border-b: rgba(0, 212, 255, 0.3);
+    --border-c: rgba(0, 212, 255, 0.1);
+    --border-d: rgba(0, 212, 255, 0.05);
+
+    /* Status */
+    --ok:   var(--accent-2);
+    --warn: #ffb800;
+    --err:  #ff4757;
+}
+
+[data-theme="light"] {
+    --bg-0: #eef2f7;
+    --bg-1: #ffffff;
+    --card-bg:   rgba(255, 255, 255, 0.96);
+    --card-bg-2: rgba(245, 247, 250, 0.92);
+    --card-bg-3: rgba(230, 236, 244, 0.95);
+
+    --fg: #1a2238;
+    --fg-muted: #5a6478;
+
+    --accent: #0086b3;
+    --accent-2: #00894a;
+
+    --border-a: rgba(0, 100, 160, 0.22);
+    --border-b: rgba(0, 100, 160, 0.40);
+    --border-c: rgba(0, 100, 160, 0.12);
+    --border-d: rgba(0, 100, 160, 0.06);
+
+    --warn: #b87800;
+    --err:  #c12a2a;
+}
+
+/* When the gradient is painted as background-clip:text (e.g. <h1>),
+ * Safari/Chrome need the source colors to be real, not transparent.
+ * The fallback below handles the case where text would otherwise be
+ * invisible in light mode if a child accidentally overrides color.
+ */
+[data-theme="light"] body { color: var(--fg); }
