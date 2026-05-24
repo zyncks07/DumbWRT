@@ -21,6 +21,8 @@ from typing import Optional
 
 import asyncssh
 
+import retention
+
 
 CONFIG_PATH = Path("/etc/openwrt-monitor/config.json")
 DB_PATH = Path("/var/lib/openwrt-monitor/monitor.db")
@@ -499,8 +501,28 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
     logger.info(f"{router_ip}: stopped")
 
 
+async def retention_loop(shutdown: asyncio.Event):
+    """Daily history cleanup. Re-reads config each cycle for live changes."""
+    while not shutdown.is_set():
+        try:
+            days = retention.get_retention_days()
+            # SQLite work goes off-thread so the event loop isn't blocked
+            # during the VACUUM.
+            await asyncio.to_thread(retention.run_cleanup, days)
+        except Exception as e:
+            logger.error(f"retention loop error: {e}", exc_info=True)
+        try:
+            await asyncio.wait_for(
+                shutdown.wait(), timeout=retention.CLEANUP_INTERVAL_SECONDS
+            )
+            break
+        except asyncio.TimeoutError:
+            pass
+
+
 async def main():
     init_db()
+    retention.init_status_table()
     config = load_config()
     routers = config.get("routers", [])
     if not routers:
@@ -518,6 +540,7 @@ async def main():
         asyncio.create_task(run_router(ip, config, shutdown), name=f"poll-{ip}")
         for ip in routers
     ]
+    tasks.append(asyncio.create_task(retention_loop(shutdown), name="retention"))
     await shutdown.wait()
     logger.info("Shutdown signaled; cancelling tasks")
     for t in tasks:

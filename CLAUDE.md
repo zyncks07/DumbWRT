@@ -163,11 +163,12 @@ Ordered by **impact / risk**. Don't reorder without good reason — earlier item
 
 ### P3 — Operations & maintenance UI
 
-12. **Logs Maintenance page** (explicitly requested):
-    - `history_retention_days` — default **30**, applied to every `*_history` table.
-    - `raw_log_lines` — default 500, how many lines `/logs` shows from `journalctl`.
-    - `vacuum_schedule` — default weekly. `DELETE FROM *_history WHERE ts < ?` then `VACUUM`.
-    - Background async task; show next-run + last-run + last-vacuum-result in the UI.
+12. **Logs Maintenance page** (explicitly requested). **Done** — `/maintenance` route, `templates/maintenance.html`, `retention.py` module shared by Flask and collector.
+    - `history_retention_days` setting (default **30**, range 1–3650), persisted in `config.json`. Applied to every `*_history` table by `retention.run_cleanup()`.
+    - `raw_log_lines` setting (default **500**, range 10–100000), persisted in `config.json`. Read per request by `/api/raw-logs` — no restart needed to change.
+    - VACUUM runs as part of every cleanup (no separate schedule).
+    - The collector schedules `retention.run_cleanup` daily via `retention_loop`. Manual "Run cleanup now" button hits `POST /api/maintenance/run-now`.
+    - Status (last run, rows deleted, duration, ok/err) lives in the `retention_status` single-row table.
 13. **Reachability strip per router** — last 24h online/offline timeline from `router_status_history`.
 14. **DB backup/restore endpoint.** The `monitor.db.backup-*` files in `/var/lib/openwrt-monitor/` show this is already partially done by hand. Wire it up: nightly snapshot, prune older than N days, manual "download backup" button.
 

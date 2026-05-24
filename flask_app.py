@@ -13,6 +13,7 @@ from datetime import datetime
 from functools import wraps
 
 import auth
+import retention
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -315,10 +316,10 @@ def api_raw_logs():
     """Get raw collector logs and router responses"""
     try:
         import subprocess
-        
-        # Get last 100 lines from collector service
+
+        n_lines = str(load_config().get('raw_log_lines', retention.DEFAULT_RAW_LOG_LINES))
         result = subprocess.run(
-            ['journalctl', '-u', 'openwrt-collector', '-n', '100', '--no-pager', '-o', 'short-iso'],
+            ['journalctl', '-u', 'openwrt-collector', '-n', n_lines, '--no-pager', '-o', 'short-iso'],
             capture_output=True,
             text=True,
             timeout=5
@@ -413,6 +414,64 @@ def api_router_raw_data(router_ip):
     except Exception as e:
         logger.error(f"Error fetching raw data from {router_ip}: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/maintenance')
+@login_required
+def maintenance_page():
+    return render_template('maintenance.html')
+
+
+@app.route('/api/maintenance', methods=['GET', 'POST'])
+@login_required
+def api_maintenance():
+    config = load_config()
+    if request.method == 'GET':
+        return jsonify({
+            'success': True,
+            'config': {
+                'history_retention_days': int(config.get(
+                    'history_retention_days', retention.DEFAULT_RETENTION_DAYS)),
+                'raw_log_lines': int(config.get(
+                    'raw_log_lines', retention.DEFAULT_RAW_LOG_LINES)),
+            },
+            'status': retention.get_status(),
+            'sizes': retention.get_history_size(),
+        })
+
+    # POST: update only the two maintenance keys; preserve everything else.
+    data = request.json or {}
+    try:
+        days = int(data.get('history_retention_days', config.get(
+            'history_retention_days', retention.DEFAULT_RETENTION_DAYS)))
+        lines = int(data.get('raw_log_lines', config.get(
+            'raw_log_lines', retention.DEFAULT_RAW_LOG_LINES)))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'days and lines must be integers'}), 400
+    if days < 1 or days > 3650:
+        return jsonify({'success': False, 'error': 'history_retention_days out of range (1–3650)'}), 400
+    if lines < 10 or lines > 100000:
+        return jsonify({'success': False, 'error': 'raw_log_lines out of range (10–100000)'}), 400
+
+    config['history_retention_days'] = days
+    config['raw_log_lines'] = lines
+    save_config(config)
+    # No service restart needed — collector re-reads the value each cycle,
+    # Flask reads raw_log_lines per request.
+    return jsonify({'success': True})
+
+
+@app.route('/api/maintenance/run-now', methods=['POST'])
+@login_required
+def api_maintenance_run_now():
+    days = int(load_config().get(
+        'history_retention_days', retention.DEFAULT_RETENTION_DAYS))
+    try:
+        result = retention.run_cleanup(days)
+    except Exception as e:
+        logger.error(f"manual cleanup failed: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+    return jsonify({'success': True, 'result': result})
+
 
 if __name__ == '__main__':
     print("Starting OpenWrt Monitor Dashboard...")
