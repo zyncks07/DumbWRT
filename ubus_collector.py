@@ -36,6 +36,9 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler(), logging.FileHandler(LOG_PATH)],
 )
+# asyncssh logs every channel open/close at INFO — far too chatty
+# for this use case where we open ~3 channels per router per poll.
+logging.getLogger("asyncssh").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
