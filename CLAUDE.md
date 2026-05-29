@@ -106,8 +106,8 @@ The original plan in this section called for a Flask → FastAPI migration plus 
 
 ### DB: stay on SQLite, tune it later if needed
 
-- WAL mode + sensible PRAGMAs is a P2 task if we add the time-series tables (`client_history`, etc.).
-- For now, schema is unchanged from v1: `routers`, `interfaces`, `clients`.
+- **WAL mode is now enabled** (set once via `PRAGMA journal_mode=WAL` in `ubus_collector.init_db()` — persistent in the DB header, so it covers Flask/retention/backup connections too). This was added in the 2026-05-30 bug-fix pass to cut `database is locked` errors under the many concurrent writers. Python's `sqlite3.connect` already defaults `timeout`/busy-wait to 5 s.
+- Schema beyond v1's `routers`/`interfaces`/`clients` now includes the history tables (`*_history`, `system_metrics`), `arp_entries`, `wifi_iface_config`, and `retention_status` — see `init_db()`.
 
 ### Auth (already done — see §2)
 
@@ -132,6 +132,7 @@ The original plan in this section called for a Flask → FastAPI migration plus 
 - **Deploying a change today** = edit file → `systemctl restart openwrt-collector openwrt-dashboard`. After v2 → `systemctl restart openwrt-monitor`.
 - **`/var/www/openwrt-monitor/wifi/` is a separate app.** Captive-portal voucher dispenser, port 3000 (Node/Express). It used to be nested inside this project when the monitor lived at `/var/www/openwrt-monitor/`; the monitor moved to `~/apps/openwrt-monitor/` in P0 #0 and the wifi app stayed put. It is gitignored. Don't touch it from this repo.
 - **Saving config restarts services.** `POST /api/config` calls `systemctl restart openwrt-collector openwrt-dashboard`. Expect a brief gap in polling. In v2 (single process), prefer a SIGHUP-style live reload.
+- **`POST /api/config` must merge, not rebuild.** It now loads the existing `config.json` and overwrites only the keys the Config form owns (`ssh_key`, `ssh_user`, `poll_interval`, `ping_interval`, `routers`). It used to rebuild the dict from scratch, which silently wiped keys owned by other pages (`history_retention_days`, `raw_log_lines`, `backup_keep_days` from Maintenance; `pfsense_*`, `history_interval`). If you add a new config key written elsewhere, this merge keeps it safe — don't reintroduce a from-scratch rebuild here.
 - **Storage today:** ~31 MB DB, ~20 MB log. With history added and 30 routers, both will grow fast. Retention is non-optional.
 
 ---
@@ -223,3 +224,26 @@ Ordered by **impact / risk**. Don't reorder without good reason — earlier item
 7. **Don't commit secrets.** The hardcoded password in v1's `flask_app.py` must not survive into v2.
 8. **Edits to `flask_app.py` and `ubus_collector.py` take effect on `systemctl restart`** — the systemd units `ExecStart` directly from this project tree, so there is no mirror step.
 9. **After any code change:** `sudo systemctl restart openwrt-collector openwrt-dashboard` (or the unified unit post-v2). Then `journalctl -u <unit> -f` to confirm clean startup.
+
+---
+
+## 8. Bug-fix Pass — 2026-05-30 (state for the next agent)
+
+A focused bug hunt. Four fixes landed; record here so they aren't re-broken or re-investigated.
+
+### Fixed
+
+1. **`POST /api/config` clobbered other pages' config keys (HIGH, data loss).** It rebuilt `config.json` from 5 keys, wiping `history_retention_days` / `raw_log_lines` / `backup_keep_days` (Maintenance page) and `pfsense_*` / `history_interval`. Now merges in place. See the §4 gotcha above. `flask_app.py` `api_config`.
+2. **Client RX/TX rate wrong for slow stations (MED).** `parse_client` only divided kbit/s→Mbit/s when `rate > 1000`, so a ≤1 Mbit/s client displayed as "1000 Mbps". Now `round(rate/1000)` unconditionally. Verified live that iwinfo `assoclist.rate` is kbit/s. `ubus_collector.py:~223`.
+3. **SQLite had no WAL (robustness).** Now `PRAGMA journal_mode=WAL` in `init_db()`. See §3 DB note.
+4. **`/api/router-raw-data` interpolated the device name into a remote shell command (LOW/defensive).** Now whitelisted with `re.fullmatch(r'[A-Za-z0-9._-]+', device)` before use. `flask_app.py` `api_router_raw_data`.
+
+> **DEPLOY STATE:** the edits are on disk and `py_compile`-clean, but at the time of writing the services had **not** been restarted (this session lacked passwordless sudo). If `PRAGMA journal_mode;` on the live DB still returns `delete`, the new collector code (incl. WAL) has not been loaded yet — run `sudo systemctl restart openwrt-collector openwrt-dashboard`. Not committed to git either.
+
+### Not explored thoroughly (open territory for the next pass)
+
+- **Templates' inline JS** (`dashboard.html`, `clients.html`, `config.html`, `maintenance.html`, `logs.html`): only skimmed for the band/signal/reachability logic. The dashboard's "smart rerender" (per-cell `setText` vs full rebuild) and the clients-table sort/filter paths were not audited for correctness or edge cases (empty data, NaN sorts, XSS via `innerHTML` with router/SSID/hostname strings).
+- **pfSense enrichment is effectively dormant.** Live `config.json` has no `pfsense_url`/`pfsense_api_key`, so `arp_loop` idles and ARP columns stay empty. `pfsense.py` and the JOINs were read but never exercised against a real pfSense. There is also **no UI to set the pfSense keys** — they can only be added to `config.json` by hand.
+- **Concurrency under load not tested.** WAL should help, but the daily `VACUUM` in `retention.run_cleanup` still takes an exclusive lock; behaviour at the 30-router target during VACUUM/backup is unverified.
+- **`ping_interval` is a dead v1 key** — still written by the Config form and stored, but the asyncio collector never reads it (it only uses `poll_interval`). Harmless, but a candidate for removal.
+- **`api_reachability` first-segment inference** (assumes the pre-window state was the opposite of the first transition) is plausible but not validated against real `router_status_history` data.

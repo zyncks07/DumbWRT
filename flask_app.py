@@ -373,13 +373,17 @@ def api_config():
             # Find routers that were removed
             removed_routers = old_routers - new_routers
             
-            config = {
-                'ssh_key': data.get('ssh_key', ''),
-                'ssh_user': data.get('ssh_user', 'root'),
-                'poll_interval': int(data.get('poll_interval', 10)),
-                'ping_interval': int(data.get('ping_interval', 10)),
-                'routers': data.get('routers', [])
-            }
+            # Merge into the existing config; only touch the keys this form
+            # owns. Rebuilding from scratch here used to wipe keys written by
+            # other pages (history_retention_days, raw_log_lines,
+            # backup_keep_days from Maintenance; pfsense_* / history_interval),
+            # silently reverting retention/backup/pfSense settings on save.
+            config = old_config
+            config['ssh_key'] = data.get('ssh_key', '')
+            config['ssh_user'] = data.get('ssh_user', 'root')
+            config['poll_interval'] = int(data.get('poll_interval', 10))
+            config['ping_interval'] = int(data.get('ping_interval', 10))
+            config['routers'] = data.get('routers', [])
             save_config(config)
             
             # Clean up database for removed routers
@@ -576,10 +580,17 @@ def api_router_raw_data(router_ip):
         # If we got devices, get info for each
         if result.returncode == 0:
             try:
+                import re as _re
                 devices_json = json.loads(result.stdout)
                 devices = devices_json.get('devices', [])
-                
+
                 for device in devices:
+                    # Device names come from the router but still flow into a
+                    # remote shell command string below; whitelist them to
+                    # remove the command-injection surface. Real names look
+                    # like 'phy0-ap0' / 'wlan0'.
+                    if not _re.fullmatch(r'[A-Za-z0-9._-]+', device or ''):
+                        continue
                     # Get interface info
                     cmd_info = [
                         'ssh', '-i', ssh_key,

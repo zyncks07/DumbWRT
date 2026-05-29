@@ -70,6 +70,12 @@ def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+    # WAL is a persistent property of the DB file, so setting it once here
+    # applies to every connection (collector tasks, Flask, retention,
+    # backup) and survives restarts. Lets readers and a writer proceed
+    # concurrently, which avoids most "database is locked" errors now that
+    # several asyncio tasks plus Flask all write/read the same file.
+    cur.execute("PRAGMA journal_mode=WAL")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS routers (
             ip TEXT PRIMARY KEY,
@@ -218,12 +224,12 @@ def parse_bandwidth(htmode: str) -> Optional[int]:
 def parse_client(c: dict) -> dict:
     rx = c.get("rx") or {}
     tx = c.get("tx") or {}
-    rx_rate = rx.get("rate", 0) or 0
-    tx_rate = tx.get("rate", 0) or 0
-    if rx_rate > 1000:
-        rx_rate //= 1000
-    if tx_rate > 1000:
-        tx_rate //= 1000
+    # iwinfo reports rates in kbit/s; store Mbit/s for the UI. Divide
+    # unconditionally — the old `if rate > 1000` guard left stations at
+    # <= 1 Mbit/s (legacy/distant clients on basic rates) unconverted,
+    # so a 1 Mbit/s client showed up as "1000 Mbps".
+    rx_rate = round((rx.get("rate", 0) or 0) / 1000)
+    tx_rate = round((tx.get("rate", 0) or 0) / 1000)
     return {
         "mac": c.get("mac"),
         "signal": c.get("signal", 0),
