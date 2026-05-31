@@ -133,7 +133,7 @@ The original plan in this section called for a Flask → FastAPI migration plus 
 - **`/var/www/openwrt-monitor/wifi/` is a separate app.** Captive-portal voucher dispenser, port 3000 (Node/Express). It used to be nested inside this project when the monitor lived at `/var/www/openwrt-monitor/`; the monitor moved to `~/apps/openwrt-monitor/` in P0 #0 and the wifi app stayed put. It is gitignored. Don't touch it from this repo.
 - **Saving config restarts services.** `POST /api/config` calls `systemctl restart openwrt-collector openwrt-dashboard`. Expect a brief gap in polling. In v2 (single process), prefer a SIGHUP-style live reload.
 - **`POST /api/config` must merge, not rebuild.** It now loads the existing `config.json` and overwrites only the keys the Config form owns (`ssh_key`, `ssh_user`, `poll_interval`, `ping_interval`, `routers`). It used to rebuild the dict from scratch, which silently wiped keys owned by other pages (`history_retention_days`, `raw_log_lines`, `backup_keep_days` from Maintenance; `pfsense_*`, `history_interval`). If you add a new config key written elsewhere, this merge keeps it safe — don't reintroduce a from-scratch rebuild here.
-- **Storage today:** ~31 MB DB, ~20 MB log. With history added and 30 routers, both will grow fast. Retention is non-optional.
+- **Storage today:** ~15 MB DB, 1 backup (~96 MB aging out in 4 days), ~20 MB log. Steady-state target: ~75 MB total (18% of 420 MB budget). Retention defaults are now aggressive — see §11.
 
 ---
 
@@ -335,3 +335,51 @@ Committed `91e06be`, pushed to `origin/main`. Services restarted. All clients no
 - **pfSense DHCP lease table not yet used.** If a device has a static IP or its pfSense ARP entry expires between 30s poll cycles, it will briefly lose its IP in the UI. Fetching `GET /api/v2/services/dhcpv4/lease` alongside the ARP table would provide persistent IP→MAC mappings that survive ARP cache expiry. This is the next meaningful improvement for IP enrichment completeness.
 - **Dumb-AP ARP gap**: the `ip neigh show` supplement does not help on bridged APs (see above). The only reliable supplemental source for these is pfSense DHCP leases.
 - **Locally-administered (randomized) MACs**: devices using per-connection MAC rotation (iOS "rotate daily" option) will cycle through MACs each session. pfSense DHCP leases would still catch them since the lease is recorded at DHCP time. No fix is possible for devices that never send DHCP (static IP + randomized MAC).
+
+---
+
+## 11. Feature Pass — 2026-06-01 (database bloat control)
+
+Commit `007f4e9`. Five files changed. Budget: 420 MB total (live DB + backups).
+
+### Problem
+
+DB was 97 MB with 30-day history at 60s interval; 20 backup files totalling 1.3 GB. Root causes:
+1. `DEFAULT_RETENTION_DAYS = 30` — 30× more history than needed for a live-view-only system.
+2. `HISTORY_INTERVAL_DEFAULT = 60` — 1-minute snapshots; 5× more rows than needed.
+3. `DEFAULT_KEEP_DAYS = 7` — user wanted 4.
+4. `arp_entries` had no cleanup path — grew unbounded with every MAC ever seen.
+5. Every service restart triggered an immediate backup, creating same-day duplicates.
+
+### Defaults changed
+
+| Constant | File | Old | New |
+|---|---|---|---|
+| `DEFAULT_RETENTION_DAYS` | `retention.py` | 30 | **1** |
+| `HISTORY_INTERVAL_DEFAULT` | `ubus_collector.py` | 60 | **300** |
+| `DEFAULT_KEEP_DAYS` | `backup.py` | 7 | **4** |
+
+### New behaviour
+
+- **`retention.run_cleanup()`**: now also `DELETE FROM arp_entries WHERE last_seen < cutoff` after the history-table loop. `arp_entries` uses `last_seen` not `ts` — the column name matters.
+- **`backup.run_backup(force=False)`**: skips if a backup was made within the last 23 h (prevents restart-triggered duplicates). The Flask "Backup now" endpoint calls `run_backup(force=True)` so manual requests always create a file.
+- **`flask_app.py api_maintenance`**: GET returns `history_interval` in config block and `backup_bytes` in sizes block. POST validates and persists `history_interval` (30–3600 s). Collector re-reads config each cycle — no restart needed for retention/interval changes.
+- **`maintenance.html`**: Storage card shows Total (DB + backups) vs 420 MB budget with %, amber at 85%. Snapshot interval input added to History retention card.
+
+### Steady-state projections
+
+| Scenario | Live DB | 4 backups | Total |
+|---|---|---|---|
+| 7 routers, ~150 clients | ~15 MB | ~60 MB | **~75 MB (18%)** |
+| 30 routers, ~600 clients | ~30 MB | ~120 MB | **~150 MB (36%)** |
+
+The pre-change 96 MB backup will be pruned 4 days after the cleanup run. Until then total is ~111 MB.
+
+### Important: `history_interval` requires collector restart
+
+Unlike `history_retention_days` (read by the daily retention loop), `history_interval` is read at collector startup via `config.get('history_interval', HISTORY_INTERVAL_DEFAULT)` in `run_router()`. Changing it in the Maintenance UI takes effect after `sudo systemctl restart openwrt-collector`.
+
+### Open territory
+
+- `arp_entries` cleanup uses the same `retention_days` window as history. Could make it a separate, longer window (e.g. 7 days) so rarely-seen devices don't lose their IP mapping overnight. Currently 1-day window matches history tables.
+- Maintenance UI does not warn that `history_interval` needs a service restart. A note or badge would improve UX.
