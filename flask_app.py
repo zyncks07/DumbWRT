@@ -396,6 +396,11 @@ def api_config():
             config['poll_interval'] = int(data.get('poll_interval', 10))
             config['ping_interval'] = int(data.get('ping_interval', 10))
             config['routers'] = data.get('routers', [])
+            # pfSense integration — only update when the form sends these keys
+            # so that a POST from an older page version can't silently wipe them.
+            for _k in ('pfsense_url', 'pfsense_api_key'):
+                if _k in data:
+                    config[_k] = data[_k]
             save_config(config)
             
             # Clean up database for removed routers

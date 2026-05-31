@@ -348,10 +348,10 @@ function renderRows() {
         const host = c.arp_hostname || '';
         const ip   = c.arp_ip || '';
         const ident = host
-            ? `<div class="hostname">${host}</div><div class="id-sub">${ip || c.mac}</div>`
+            ? `<div class="hostname">${host}</div><div class="id-sub" data-copy="${ip || c.mac}" data-copy-label="${ip ? 'IP' : 'MAC'}">${ip || c.mac}</div>`
             : (ip
-                ? `<div class="hostname">${ip}</div><div class="id-sub">${c.mac}</div>`
-                : `<div class="mono">${c.mac}</div>`);
+                ? `<div class="hostname" data-copy="${ip}" data-copy-label="IP">${ip}</div><div class="id-sub" data-copy="${c.mac}" data-copy-label="MAC">${c.mac}</div>`
+                : `<div class="mono" data-copy="${c.mac}" data-copy-label="MAC">${c.mac}</div>`);
         const band = bandOf(c.frequency);
         const bandHtml = band
             ? `<span class="band-badge band-${band}">${band === '24' ? '2.4 GHz' : '5 GHz'}</span>`
@@ -361,7 +361,7 @@ function renderRows() {
         return `
             <tr>
                 <td class="identity">${ident}</td>
-                <td class="mono muted">${c.mac || ''}</td>
+                <td class="mono muted">${c.mac ? `<span data-copy="${c.mac}" data-copy-label="MAC">${c.mac}</span>` : ''}</td>
                 <td>${c.router_hostname || c.router_ip || ''}</td>
                 <td>${c.ssid || '<span class="muted">—</span>'}</td>
                 <td>${bandHtml}</td>
@@ -446,6 +446,7 @@ updateHeaderArrows();
 load();
 setInterval(load, 10000);
 </script>
+<script src="/static/copy-utils.js"></script>
 <script src="/static/theme.js"></script>
 </body>
 </html>

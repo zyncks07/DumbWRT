@@ -548,6 +548,48 @@
             </div>
         </div>
 
+            <!-- pfSense Integration Card -->
+            <div class="card">
+                <div class="card-title">
+                    <i class="fas fa-shield-alt"></i>
+                    pfSense Integration
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">pfSense API URL</label>
+                    <input type="text" class="form-input" id="pfsense_url"
+                           placeholder="https://192.168.9.1:443/">
+                    <div class="help-text">Base URL of your pfSense — including port if non-standard.
+                        Requires the <strong>pfSense-pkg-RESTAPI</strong> package installed on pfSense.</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">pfSense API Key</label>
+                    <div class="input-group">
+                        <input type="password" class="form-input" id="pfsense_api_key"
+                               placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                               autocomplete="off">
+                        <button class="btn btn-icon" type="button"
+                                onclick="toggleKeyVisibility()"
+                                title="Show / hide key" id="keyVisBtn">
+                            <i class="fas fa-eye" id="keyVisIcon"></i>
+                        </button>
+                    </div>
+                    <div class="help-text">API key from pfSense → System → REST API → Keys.
+                        Stored in config.json (root-owned, mode 600).</div>
+                </div>
+
+                <div class="info-box">
+                    <strong><i class="fas fa-info-circle"></i> What this enables:</strong>
+                    <ul style="margin-left:18px; list-style:disc; margin-top:6px;">
+                        <li>Resolves WiFi client MACs to IP addresses via pfSense ARP table</li>
+                        <li>Populates hostname column when pfSense has DNS/DHCP records</li>
+                        <li>Refreshes every 30 seconds automatically once configured</li>
+                        <li>Leave blank to disable — existing ARP data is preserved</li>
+                    </ul>
+                </div>
+            </div>
+
         <!-- Save Actions -->
         <div class="card full-width">
             <div class="actions">
@@ -613,6 +655,8 @@
                 document.getElementById('ssh_user').value = config.ssh_user || 'root';
                 document.getElementById('poll_interval').value = config.poll_interval || 10;
                 document.getElementById('ping_interval').value = config.ping_interval || 10;
+                document.getElementById('pfsense_url').value = config.pfsense_url || '';
+                document.getElementById('pfsense_api_key').value = config.pfsense_api_key || '';
 
                 routers = config.routers || [];
                 if (routers.length === 0) {
@@ -641,6 +685,18 @@
             } catch (error) {
                 console.error('Error loading SSH key:', error);
                 document.getElementById('sshPublicKey').textContent = 'Error loading key';
+            }
+        }
+
+        function toggleKeyVisibility() {
+            const inp = document.getElementById('pfsense_api_key');
+            const ico = document.getElementById('keyVisIcon');
+            if (inp.type === 'password') {
+                inp.type = 'text';
+                ico.className = 'fas fa-eye-slash';
+            } else {
+                inp.type = 'password';
+                ico.className = 'fas fa-eye';
             }
         }
 
@@ -732,7 +788,9 @@
                 poll_interval: parseInt(document.getElementById('poll_interval').value) || 10,
                 ping_interval: parseInt(document.getElementById('ping_interval').value) || 10,
                 routers: validRouters,
-                password_change: passwordChange
+                password_change: passwordChange,
+                pfsense_url: document.getElementById('pfsense_url').value.trim(),
+                pfsense_api_key: document.getElementById('pfsense_api_key').value.trim(),
             };
 
             try {

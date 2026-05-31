@@ -233,6 +233,31 @@ def parse_bandwidth(htmode: str) -> Optional[int]:
     return None
 
 
+def parse_router_arp(output: str) -> dict:
+    """Parse `ip neigh show` stdout into {lowercase_mac: ip}.
+
+    Skips entries without a resolved MAC (no 'lladdr') and entries in
+    terminal states (FAILED, INCOMPLETE). STALE/REACHABLE/DELAY/PROBE
+    are all valid — the client was seen recently enough to have a mapping.
+    """
+    result = {}
+    for line in output.splitlines():
+        parts = line.split()
+        if "lladdr" not in parts:
+            continue
+        state = parts[-1]
+        if state in ("FAILED", "INCOMPLETE"):
+            continue
+        try:
+            ip = parts[0]
+            mac = parts[parts.index("lladdr") + 1].lower()
+        except (ValueError, IndexError):
+            continue
+        if mac and ip:
+            result[mac] = ip
+    return result
+
+
 def parse_client(c: dict) -> dict:
     rx = c.get("rx") or {}
     tx = c.get("tx") or {}
@@ -568,6 +593,21 @@ async def poll_once(conn: asyncssh.SSHClientConnection, router_ip: str,
     wifi_config = await fetch_wifi_config(conn)
 
     save_snapshot(router_ip, hostname, interfaces, wifi_config)
+
+    # Supplement arp_entries from the router's own kernel ARP table.
+    # The AP sees ARP from every associated client before pfSense does,
+    # so this catches static-IP devices and ARP-expired pfSense entries.
+    # INSERT OR IGNORE means pfSense data always takes precedence.
+    try:
+        neigh_result = await asyncio.wait_for(
+            conn.run("ip neigh show", check=False), timeout=COMMAND_TIMEOUT
+        )
+        if neigh_result.exit_status == 0 and neigh_result.stdout:
+            router_arp = parse_router_arp(neigh_result.stdout)
+            save_router_arp(router_ip, router_arp)
+    except (asyncio.TimeoutError, asyncssh.Error):
+        pass
+
     return hostname, interfaces, system_info, len(devices), total_clients
 
 
@@ -681,10 +721,39 @@ def save_arp_entries(entries: list[dict]):
         conn.close()
 
 
+def save_router_arp(router_ip: str, arp_map: dict):
+    """Insert router ARP entries into arp_entries using INSERT OR IGNORE.
+
+    Router ARP acts as a secondary source: it only creates rows that
+    pfSense hasn't populated. When pfSense's arp_loop runs it does a
+    full ON CONFLICT DO UPDATE, overwriting these rows with the richer
+    pfSense data (verified IP + hostname). This layering means:
+      - static-IP / pfSense-invisible clients  → router fills the gap
+      - DHCP clients pfSense knows             → pfSense wins
+    """
+    if not arp_map:
+        return
+    now = datetime.now().isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        for mac, ip in arp_map.items():
+            cur.execute(
+                "INSERT OR IGNORE INTO arp_entries "
+                "(mac, ip, hostname, interface, last_seen) "
+                "VALUES (?, ?, '', ?, ?)",
+                (mac, ip, router_ip, now),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 async def arp_loop(shutdown: asyncio.Event):
     """Pull pfSense ARP table on a fixed interval. Re-reads config each
     cycle so a UI change to pfsense_url / pfsense_api_key takes effect
     on the next loop iteration without restarting."""
+    _warned_unconfigured = False
     while not shutdown.is_set():
         cfg = load_config()
         url = cfg.get("pfsense_url", "")
@@ -692,13 +761,25 @@ async def arp_loop(shutdown: asyncio.Event):
         interval = int(cfg.get("pfsense_arp_interval", PFSENSE_ARP_INTERVAL_DEFAULT))
         try:
             if url and key:
+                _warned_unconfigured = False
                 entries = await pfsense.fetch_arp_table(url, key)
                 if entries:
                     save_arp_entries(entries)
                     logger.info(f"pfSense ARP: refreshed {len(entries)} entries")
+                else:
+                    logger.warning(
+                        "pfSense ARP: fetch returned no entries — verify pfsense_url, "
+                        "pfsense_api_key, and that the pfSense REST API package is installed"
+                    )
             else:
-                # Not configured — sleep longer between checks.
                 interval = max(interval, 300)
+                if not _warned_unconfigured:
+                    logger.warning(
+                        "pfSense ARP enrichment not configured — "
+                        "set pfsense_url and pfsense_api_key via Settings or config.json; "
+                        "client IP addresses will not be populated until then"
+                    )
+                    _warned_unconfigured = True
         except Exception as e:
             logger.error(f"arp_loop error: {e}", exc_info=True)
         try:
