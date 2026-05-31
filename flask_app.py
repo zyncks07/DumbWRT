@@ -654,7 +654,10 @@ def maintenance_page():
 @login_required
 def api_maintenance():
     config = load_config()
+    _HISTORY_INTERVAL_DEFAULT = 300
     if request.method == 'GET':
+        sizes = retention.get_history_size()
+        sizes['backup_bytes'] = sum(b['bytes'] for b in backup.list_backups())
         return jsonify({
             'success': True,
             'config': {
@@ -662,34 +665,40 @@ def api_maintenance():
                     'history_retention_days', retention.DEFAULT_RETENTION_DAYS)),
                 'raw_log_lines': int(config.get(
                     'raw_log_lines', retention.DEFAULT_RAW_LOG_LINES)),
+                'history_interval': int(config.get(
+                    'history_interval', _HISTORY_INTERVAL_DEFAULT)),
             },
             'status': retention.get_status(),
-            'sizes': retention.get_history_size(),
+            'sizes': sizes,
         })
 
     # POST: update only the maintenance keys; preserve everything else.
     data = request.json or {}
     try:
-        days = int(data.get('history_retention_days', config.get(
-            'history_retention_days', retention.DEFAULT_RETENTION_DAYS)))
-        lines = int(data.get('raw_log_lines', config.get(
-            'raw_log_lines', retention.DEFAULT_RAW_LOG_LINES)))
-        bdays = int(data.get('backup_keep_days', config.get(
-            'backup_keep_days', backup.DEFAULT_KEEP_DAYS)))
+        days     = int(data.get('history_retention_days', config.get(
+                       'history_retention_days', retention.DEFAULT_RETENTION_DAYS)))
+        lines    = int(data.get('raw_log_lines', config.get(
+                       'raw_log_lines', retention.DEFAULT_RAW_LOG_LINES)))
+        bdays    = int(data.get('backup_keep_days', config.get(
+                       'backup_keep_days', backup.DEFAULT_KEEP_DAYS)))
+        interval = int(data.get('history_interval', config.get('history_interval', 300)))
     except (TypeError, ValueError):
-        return jsonify({'success': False, 'error': 'days and lines must be integers'}), 400
+        return jsonify({'success': False, 'error': 'all values must be integers'}), 400
     if days < 1 or days > 3650:
         return jsonify({'success': False, 'error': 'history_retention_days out of range (1–3650)'}), 400
     if lines < 10 or lines > 100000:
         return jsonify({'success': False, 'error': 'raw_log_lines out of range (10–100000)'}), 400
     if bdays < 1 or bdays > 3650:
         return jsonify({'success': False, 'error': 'backup_keep_days out of range (1–3650)'}), 400
+    if interval < 30 or interval > 3600:
+        return jsonify({'success': False, 'error': 'history_interval out of range (30–3600)'}), 400
 
     config['history_retention_days'] = days
     config['raw_log_lines'] = lines
     config['backup_keep_days'] = bdays
+    config['history_interval'] = interval
     save_config(config)
-    # No service restart needed — collector re-reads the value each cycle,
+    # No service restart needed — collector re-reads config each cycle,
     # Flask reads raw_log_lines per request.
     return jsonify({'success': True})
 
@@ -721,7 +730,7 @@ def api_backups_list():
 @app.route('/api/maintenance/backup/run', methods=['POST'])
 @login_required
 def api_backup_run():
-    result = backup.run_backup()
+    result = backup.run_backup(force=True)  # user explicitly requested — always create
     if not result['ok']:
         return jsonify({'success': False, 'error': result['message']}), 500
     # Apply current retention policy after creating a new one.

@@ -235,14 +235,21 @@
         <h2><i class="fas fa-clock-rotate-left"></i> History retention</h2>
         <div class="field">
             <label for="retention">Keep history for</label>
-            <input type="number" id="retention" min="1" max="3650" value="30">
+            <input type="number" id="retention" min="1" max="3650" value="1">
             <span style="color:var(--fg-muted)">days</span>
+        </div>
+        <div class="field">
+            <label for="hist-interval">Snapshot interval</label>
+            <input type="number" id="hist-interval" min="30" max="3600" value="300">
+            <span style="color:var(--fg-muted)">seconds</span>
         </div>
         <div class="hint">
             Applies to <code>client_history</code>, <code>interface_history</code>,
-            <code>router_status_history</code>, <code>system_metrics</code>.
-            Old rows are deleted once per day and a <code>VACUUM</code> reclaims
-            disk space.
+            <code>router_status_history</code>, <code>system_metrics</code>, and
+            <code>arp_entries</code>.
+            Old rows are deleted once per day; a <code>VACUUM</code> reclaims disk space.
+            <br>Snapshot interval controls how often history rows are written (default 300 s = 5 min).
+            Requires a collector restart to take effect.
         </div>
     </div>
 
@@ -273,8 +280,10 @@
     </div>
 
     <div class="card" style="grid-column: 1 / -1;">
-        <h2><i class="fas fa-table-cells"></i> Database size</h2>
+        <h2><i class="fas fa-table-cells"></i> Storage</h2>
+        <div class="status-row"><span class="k">Total (DB + backups)</span><span class="v" id="sz-total">—</span></div>
         <div class="status-row"><span class="k">monitor.db on disk</span><span class="v" id="sz-db">—</span></div>
+        <div class="status-row"><span class="k">Backups total</span><span class="v" id="sz-bk">—</span></div>
         <div class="status-row"><span class="k">client_history rows</span><span class="v" id="sz-ch">—</span></div>
         <div class="status-row"><span class="k">interface_history rows</span><span class="v" id="sz-ih">—</span></div>
         <div class="status-row"><span class="k">router_status_history rows</span><span class="v" id="sz-rh">—</span></div>
@@ -343,6 +352,7 @@ async function load() {
     if (!d.success) { toast('Load failed', 'err'); return; }
     $('retention').value = d.config.history_retention_days;
     $('loglines').value = d.config.raw_log_lines;
+    $('hist-interval').value = d.config.history_interval || 300;
 
     const s = d.status;
     $('st-last').textContent = s.last_run || 'Never';
@@ -352,7 +362,13 @@ async function load() {
     $('st-dur').textContent = (s.duration_ms != null) ? (s.duration_ms + ' ms') : '—';
 
     const z = d.sizes;
+    const totalBytes = (z.db_bytes || 0) + (z.backup_bytes || 0);
+    const BUDGET = 420 * 1024 * 1024;
+    const pct = Math.min(100, (totalBytes / BUDGET * 100)).toFixed(1);
+    $('sz-total').textContent = `${fmtBytes(totalBytes)} of 420 MB (${pct}%)`;
+    $('sz-total').style.color = totalBytes > BUDGET * 0.85 ? 'var(--warn)' : 'var(--ok)';
     $('sz-db').textContent = fmtBytes(z.db_bytes);
+    $('sz-bk').textContent = fmtBytes(z.backup_bytes);
     $('sz-ch').textContent = z.client_history.toLocaleString();
     $('sz-ih').textContent = z.interface_history.toLocaleString();
     $('sz-rh').textContent = z.router_status_history.toLocaleString();
@@ -402,6 +418,7 @@ $('saveBtn').addEventListener('click', async () => {
         history_retention_days: parseInt($('retention').value, 10),
         raw_log_lines: parseInt($('loglines').value, 10),
         backup_keep_days: parseInt($('bkeep').value, 10),
+        history_interval: parseInt($('hist-interval').value, 10),
     };
     const r = await fetch('/api/maintenance', {
         method: 'POST',

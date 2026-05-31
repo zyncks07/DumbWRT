@@ -37,7 +37,7 @@ BACKOFF_MAX = 60
 # Seconds between history snapshots. Decoupled from poll_interval
 # so we can poll frequently for the live view without bloating the
 # history tables. Override per-deploy via config['history_interval'].
-HISTORY_INTERVAL_DEFAULT = 60
+HISTORY_INTERVAL_DEFAULT = 300
 # Seconds between pfSense ARP-table pulls. pfSense's ARP cache itself
 # updates much faster than this, so 30s is a fine UX/load compromise.
 PFSENSE_ARP_INTERVAL_DEFAULT = 30

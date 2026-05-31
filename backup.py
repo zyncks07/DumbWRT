@@ -16,7 +16,7 @@ from pathlib import Path
 DB_PATH = Path("/var/lib/openwrt-monitor/monitor.db")
 BACKUP_DIR = DB_PATH.parent
 BACKUP_PREFIX = "monitor.db.backup-"
-DEFAULT_KEEP_DAYS = 7
+DEFAULT_KEEP_DAYS = 4
 BACKUP_INTERVAL_SECONDS = 86400  # daily
 
 logger = logging.getLogger(__name__)
@@ -27,8 +27,23 @@ def _new_backup_path(now: datetime | None = None) -> Path:
     return BACKUP_DIR / f"{BACKUP_PREFIX}{now.strftime('%Y%m%d-%H%M%S')}"
 
 
-def run_backup() -> dict:
-    """Take an online SQLite snapshot. Returns a status dict."""
+def run_backup(force: bool = False) -> dict:
+    """Take an online SQLite snapshot. Returns a status dict.
+
+    When `force=False` (the default used by the automatic daily loop),
+    skips if a backup was created within the last 23 hours — prevents
+    multiple restarts in one day from accumulating duplicate backups.
+    Pass `force=True` for user-initiated "Backup now" requests.
+    """
+    if not force:
+        recent = list_backups()
+        if recent:
+            age_s = (datetime.now() - datetime.fromisoformat(recent[0]['mtime'])).total_seconds()
+            if age_s < 82800:  # 23 h
+                msg = f"Skipped — {recent[0]['name']} is only {int(age_s / 3600)}h old"
+                logger.info(f"backup: {msg}")
+                return {'ts': datetime.now().isoformat(), 'name': None,
+                        'bytes': 0, 'duration_ms': 0, 'ok': True, 'message': msg}
     target = _new_backup_path()
     start = time.monotonic()
     error: str | None = None

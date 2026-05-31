@@ -23,7 +23,7 @@ HISTORY_TABLES = (
     "system_metrics",
 )
 
-DEFAULT_RETENTION_DAYS = 30
+DEFAULT_RETENTION_DAYS = 1
 DEFAULT_RAW_LOG_LINES = 500
 CLEANUP_INTERVAL_SECONDS = 86400  # daily
 
@@ -76,6 +76,9 @@ def run_cleanup(retention_days: int) -> dict:
             for tbl in HISTORY_TABLES:
                 cur.execute(f"DELETE FROM {tbl} WHERE ts < ?", (cutoff,))
                 rows_deleted += cur.rowcount
+            # arp_entries uses last_seen (not ts) and has no other cleanup path.
+            cur.execute("DELETE FROM arp_entries WHERE last_seen < ?", (cutoff,))
+            rows_deleted += cur.rowcount
             conn.commit()
             # VACUUM cannot run inside a transaction.
             cur.execute("VACUUM")
