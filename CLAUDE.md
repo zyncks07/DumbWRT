@@ -28,7 +28,7 @@ A web app that monitors WiFi clients across a fleet of OpenWrt routers (currentl
 | Flask web app | `/home/bulik/apps/openwrt-monitor/flask_app.py` (port 5000) |
 | SSH/ubus collector daemon | `/home/bulik/apps/openwrt-monitor/ubus_collector.py` |
 | HTML templates | `/home/bulik/apps/openwrt-monitor/templates/{login,dashboard,config,logs}.html` |
-| Static assets | `/home/bulik/apps/openwrt-monitor/static/` (empty — everything is inlined in templates) |
+| Static assets | `/home/bulik/apps/openwrt-monitor/static/` — `fontawesome/`, `theme.css`, `theme.js`, `copy-utils.js` |
 | Systemd unit copies in repo | `/home/bulik/apps/openwrt-monitor/system/openwrt-{collector,dashboard}.service` |
 | Runtime config | `/etc/openwrt-monitor/config.json` |
 | SSH client config | `/etc/openwrt-monitor/ssh_config` (ControlMaster multiplex) |
@@ -243,7 +243,7 @@ A focused bug hunt. Four fixes landed; record here so they aren't re-broken or r
 ### Not explored thoroughly (open territory for the next pass)
 
 - **Templates' inline JS** (`dashboard.html`, `clients.html`, `config.html`, `maintenance.html`, `logs.html`): only skimmed for the band/signal/reachability logic. The dashboard's "smart rerender" (per-cell `setText` vs full rebuild) and the clients-table sort/filter paths were not audited for correctness or edge cases (empty data, NaN sorts, XSS via `innerHTML` with router/SSID/hostname strings).
-- **pfSense enrichment is effectively dormant.** Live `config.json` has no `pfsense_url`/`pfsense_api_key`, so `arp_loop` idles and ARP columns stay empty. `pfsense.py` and the JOINs were read but never exercised against a real pfSense. There is also **no UI to set the pfSense keys** — they can only be added to `config.json` by hand.
+- **pfSense enrichment is now active and verified** — credentials restored via the new Settings UI card (2026-06-01). All clients are showing IPs. The Settings card (`config.html`) lets the user set `pfsense_url` / `pfsense_api_key` without hand-editing JSON. `arp_loop` now logs a WARNING when unconfigured or when the fetch returns empty, so silent failure can't recur undetected.
 - **Concurrency under load not tested.** WAL should help, but the daily `VACUUM` in `retention.run_cleanup` still takes an exclusive lock; behaviour at the 30-router target during VACUUM/backup is unverified.
 - **`ping_interval` is a dead v1 key** — still written by the Config form and stored, but the asyncio collector never reads it (it only uses `poll_interval`). Harmless, but a candidate for removal.
 - **`api_reachability` first-segment inference** (assumes the pre-window state was the opposite of the first transition) is plausible but not validated against real `router_status_history` data.
@@ -279,3 +279,59 @@ Committed `da0c63e`, pushed to `origin/main`. Services restarted. The new `inter
 - **`iwinfo info`.signal for an AP is always −1** (not applicable in Master mode) — it is intentionally not stored or displayed. If STA-mode monitoring is ever added, revisit.
 - **Radio mini cells use `innerHTML`** in the incremental path (safe today, but note it as an exception to the usual `setText` discipline — don't extend this pattern to user-controlled strings).
 - **Avg Client SNR disappears when there are no clients.** This is correct UX but means a newly-booted router shows `—` for SNR even though the radio is up. A future improvement could show the radio noise floor alone as a proxy.
+
+---
+
+## 10. Feature + Bug-fix Pass — 2026-06-01
+
+Commit `91e06be`. Six files changed.
+
+### One-click copy for all IPs and MACs (`static/copy-utils.js`)
+
+Shared utility loaded by `dashboard.html` and `clients.html` (added before `theme.js`). All other templates are unaffected.
+
+- **Pattern**: add `data-copy="<value>" data-copy-label="IP|MAC"` to any element. One delegated listener on `document` (capture phase) handles all clicks — no per-element `onclick` needed.
+- **Cross-browser**: `navigator.clipboard.writeText` primary path; `execCommand('copy')` via hidden `<textarea>` fallback for HTTP / Android WebView / older Safari; `setSelectionRange(0, length)` makes the fallback work on iOS.
+- **Capture phase + stopPropagation**: the listener fires before any bubble-phase `onclick` (e.g. the router row-expand `toggleRouter`), so clicking an IP cell copies without also toggling the row.
+- **Toast**: fixed-position `#_ct` div, `var(--ok)` background (theme-aware), repositions to avoid viewport edges, fades after 1.5 s. `aria-live="polite"` for screen readers.
+- **dashboard.html**: router `.ip` cells, expanded client MAC `<td>`, ARP IP within `ipCell`. Old `copyMAC()` removed.
+- **clients.html**: identity column (IP/MAC), standalone MAC `<td>`.
+- **`innerHTML` use in incremental path** is safe (values are DB integers/addresses) but is an exception to `setText` discipline — don't extend to user-controlled strings.
+
+### pfSense Settings UI (`templates/config.html`)
+
+New "pfSense Integration" card in `settings-grid`:
+- `pfsense_url` text input, `pfsense_api_key` password input with show/hide toggle (`toggleKeyVisibility()`).
+- `loadConfig()` populates fields from the existing `GET /api/config` response.
+- `saveConfig()` includes `pfsense_url` and `pfsense_api_key` in the POST body.
+- `flask_app.py api_config` merges these keys **only when present in POST data** (key-presence guard: `if _k in data: config[_k] = data[_k]`). This means an old form version that doesn't send the keys can never silently wipe them — the same root-cause protection as the 2026-05-30 config-save fix.
+
+### Fix: silent pfSense ARP failure (`ubus_collector.py`)
+
+`arp_loop` previously logged nothing when credentials were missing or when the fetch returned an empty list. A config-save bug on 2026-05-25 wiped `pfsense_url`/`pfsense_api_key` from config.json; the loop ran silently for 7 days with no indication. Now:
+- **No credentials**: logs one `WARNING` (suppressed on subsequent cycles via `_warned_unconfigured` flag to avoid log spam).
+- **Fetch returns empty list**: logs a `WARNING` every cycle (not suppressed — empty from a configured pfSense is always abnormal).
+
+### Router ARP supplement (`ubus_collector.py`) — limited value on dumb APs
+
+`parse_router_arp()` parses `ip neigh show` stdout; `save_router_arp()` does `INSERT OR IGNORE` into `arp_entries` (pfSense data always wins). Called from `poll_once()` over the existing SSH connection after iwinfo calls.
+
+**Important caveat**: on dumb-AP (bridged) topologies the router's kernel ARP table only contains hosts the AP's own L3 stack has resolved (typically the gateway + a handful of management hosts). WiFi clients are forwarded at L2 — the AP never resolves their IPs. `ip neigh show` returns ~3 entries in this setup, making this supplement a no-op in practice. It is harmless and may help in non-bridged setups, but it is **not** the solution for bridged dumb-APs. See open territory below.
+
+### Root cause of missing client IPs — post-mortem
+
+The config-save bug (fixed 2026-05-30) wiped pfSense credentials from config.json on 2026-05-25 when the user saved Settings. `arp_loop` ran silently with no credentials for 7 days. The 7-day-old `arp_entries` rows were from the last successful pfSense poll. Restoring credentials via the new Settings UI resolved all missing IPs immediately.
+
+Three specific MACs investigated on router "UniFiACMEsh":
+- `B2:90:BD:99:46:1C` and `BA:13:1A:C7:7A:F4` — locally-administered bit set → randomized/private MACs from modern devices (iOS/Android/Windows MAC randomization). These now resolve once pfSense ARP is active.
+- `A8:16:9D:EA:62:A8` — real Apple OUI, globally administered — resolved after ARP refresh.
+
+### Deploy state
+
+Committed `91e06be`, pushed to `origin/main`. Services restarted. All clients now show IPs. pfSense ARP logs `refreshed N entries` every 30 s.
+
+### Open territory
+
+- **pfSense DHCP lease table not yet used.** If a device has a static IP or its pfSense ARP entry expires between 30s poll cycles, it will briefly lose its IP in the UI. Fetching `GET /api/v2/services/dhcpv4/lease` alongside the ARP table would provide persistent IP→MAC mappings that survive ARP cache expiry. This is the next meaningful improvement for IP enrichment completeness.
+- **Dumb-AP ARP gap**: the `ip neigh show` supplement does not help on bridged APs (see above). The only reliable supplemental source for these is pfSense DHCP leases.
+- **Locally-administered (randomized) MACs**: devices using per-connection MAC rotation (iOS "rotate daily" option) will cycle through MACs each session. pfSense DHCP leases would still catch them since the lease is recorded at DHCP time. No fix is possible for devices that never send DHCP (static IP + randomized MAC).
