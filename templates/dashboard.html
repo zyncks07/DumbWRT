@@ -271,12 +271,29 @@
         }
         .router-th, .router-tr {
             display: grid;
-            grid-template-columns: 28px minmax(140px, 1.4fr) 110px 60px 60px 60px 64px 90px 110px 28px;
+            grid-template-columns: 28px minmax(140px, 1.4fr) 112px 112px 110px 60px 60px 60px 64px 90px 110px 28px;
             align-items: center;
             gap: 10px;
             padding: 0 14px;
             font-size: 12px;
         }
+        .radio-mini {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 10px;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        .rm-ch {
+            background: var(--border-c);
+            border-radius: 3px;
+            padding: 1px 5px;
+            color: var(--fg-muted);
+            font-size: 9px;
+            font-weight: 600;
+        }
+        .rm-val { font-weight: 600; }
         .reach-strip {
             height: 14px;
             border-radius: 3px;
@@ -353,6 +370,51 @@
             border-bottom: 1px solid var(--border-a);
         }
         .router-detail.expanded { display: block; }
+
+        /* ---- Radio health metrics strip (per interface card) ---- */
+        .radio-metrics {
+            display: flex;
+            background: var(--card-bg-2);
+            border: 1px solid var(--border-c);
+            border-radius: 5px;
+            margin-bottom: 10px;
+            overflow: hidden;
+        }
+        .radio-metric {
+            flex: 1;
+            padding: 6px 10px;
+            border-right: 1px solid var(--border-c);
+            min-width: 0;
+        }
+        .radio-metric:last-child { border-right: none; }
+        .radio-metric-label {
+            font-size: 9px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--fg-muted);
+            margin-bottom: 3px;
+            font-weight: 600;
+        }
+        .radio-metric-value {
+            font-size: 12px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            color: var(--fg);
+        }
+        .radio-metric-bar {
+            height: 3px;
+            background: var(--border-d);
+            border-radius: 2px;
+            overflow: hidden;
+            margin-top: 4px;
+        }
+        .radio-metric-fill { height: 100%; border-radius: 2px; }
+        .m-ok   { color: var(--ok); }
+        .m-warn { color: var(--warn); }
+        .m-err  { color: var(--err); }
+        .radio-metric-fill.m-ok   { background: var(--ok); }
+        .radio-metric-fill.m-warn { background: var(--warn); }
+        .radio-metric-fill.m-err  { background: var(--err); }
     </style>
 </head>
 <body>
@@ -534,6 +596,77 @@
         function fmtLoad(v) { return (v != null) ? Number(v).toFixed(2) : '—'; }
         function fmtUptime(s) { return s ? formatTime(s) : '—'; }
 
+        /* ---- Radio health helpers ---- */
+        function noiseClass(n) {
+            if (n == null) return '';
+            return n <= -90 ? 'm-ok' : n <= -80 ? 'm-warn' : 'm-err';
+        }
+        function snrClass(snr) {
+            if (snr == null) return '';
+            return snr >= 35 ? 'm-ok' : snr >= 20 ? 'm-warn' : 'm-err';
+        }
+        function bitrateClass(kbps) {
+            if (!kbps) return '';
+            return kbps >= 300000 ? 'm-ok' : kbps >= 54000 ? 'm-warn' : 'm-err';
+        }
+        function fmtKbps(kbps) {
+            if (!kbps) return '—';
+            const m = kbps / 1000;
+            return m >= 1000 ? (m / 1000).toFixed(1) + ' Gbps' : Math.round(m) + ' Mbps';
+        }
+        function fmtKbpsShort(kbps) {
+            if (!kbps) return '—';
+            const m = kbps / 1000;
+            return m >= 1000 ? (m / 1000).toFixed(1) + 'G' : Math.round(m) + 'M';
+        }
+        function fmtRadioMini(ch, noise, kbps) {
+            if (ch == null && noise == null && !kbps)
+                return '<span style="color:var(--fg-muted);font-size:10px">—</span>';
+            const nc = noiseClass(noise);
+            const bc = bitrateClass(kbps);
+            return '<div class="radio-mini">'
+                + (ch    != null ? `<span class="rm-ch">${ch}</span>` : '')
+                + (noise != null ? `<span class="rm-val ${nc}">${noise}</span>` : '')
+                + (kbps          ? `<span class="rm-val ${bc}">${fmtKbpsShort(kbps)}</span>` : '')
+                + '</div>';
+        }
+        function renderRadioMetrics(s, clients) {
+            const avgSNR = clients.length
+                ? Math.round(clients.reduce((sum, c) => sum + ((c.signal || 0) - (c.noise || -95)), 0) / clients.length)
+                : null;
+            const nc = noiseClass(s.noise);
+            const sc = snrClass(avgSNR);
+            const bc = bitrateClass(s.bitrate);
+            const nFill = s.noise != null ? Math.max(0, Math.min(100, (Math.abs(s.noise) - 50) / 50 * 100)).toFixed(1) : 0;
+            const sFill = avgSNR != null ? Math.max(0, Math.min(100, avgSNR / 60 * 100)).toFixed(1) : 0;
+            const bFill = s.bitrate ? Math.max(0, Math.min(100, s.bitrate / 1000 / 600 * 100)).toFixed(1) : 0;
+            return `<div class="radio-metrics">
+                <div class="radio-metric">
+                    <div class="radio-metric-label">Channel</div>
+                    <div class="radio-metric-value">${s.channel || '—'}</div>
+                </div>
+                <div class="radio-metric">
+                    <div class="radio-metric-label">Noise Floor</div>
+                    <div class="radio-metric-value ${nc}">${s.noise != null ? s.noise + ' dBm' : '—'}</div>
+                    ${s.noise != null ? `<div class="radio-metric-bar"><div class="radio-metric-fill ${nc}" style="width:${nFill}%"></div></div>` : ''}
+                </div>
+                <div class="radio-metric">
+                    <div class="radio-metric-label">Avg Client SNR</div>
+                    <div class="radio-metric-value ${sc}">${avgSNR != null ? avgSNR + ' dB' : '—'}</div>
+                    ${avgSNR != null ? `<div class="radio-metric-bar"><div class="radio-metric-fill ${sc}" style="width:${sFill}%"></div></div>` : ''}
+                </div>
+                <div class="radio-metric">
+                    <div class="radio-metric-label">Radio Rate</div>
+                    <div class="radio-metric-value ${bc}">${fmtKbps(s.bitrate)}</div>
+                    ${s.bitrate ? `<div class="radio-metric-bar"><div class="radio-metric-fill ${bc}" style="width:${bFill}%"></div></div>` : ''}
+                </div>
+                <div class="radio-metric">
+                    <div class="radio-metric-label">TX Power</div>
+                    <div class="radio-metric-value">${s.txpower != null ? s.txpower + ' dBm' : '—'}</div>
+                </div>
+            </div>`;
+        }
+
         function renderRouterRow(r, safeIP, isExpanded) {
             const online = r.online === 1;
             const reachHtml = renderReachStrip(reachData[r.ip], reachWindow);
@@ -544,6 +677,8 @@
                      onclick="toggleRouter('${r.ip}')">
                     <div><span class="dot"></span></div>
                     <div class="hostname">${r.hostname || r.ip}</div>
+                    <div class="rm24">${fmtRadioMini(r.ch_24, r.noise_24, r.bitrate_24)}</div>
+                    <div class="rm5">${fmtRadioMini(r.ch_5, r.noise_5, r.bitrate_5)}</div>
                     <div class="ip">${r.ip}</div>
                     <div class="num cnt">${r.total_clients || 0}</div>
                     <div class="num b24">${r.clients_24 || 0}</div>
@@ -593,6 +728,8 @@
                             <div class="router-th">
                                 <div></div>
                                 <div>Hostname</div>
+                                <div>2.4G Radio</div>
+                                <div>5G Radio</div>
                                 <div>IP</div>
                                 <div class="num">Clients</div>
                                 <div class="num">2.4G</div>
@@ -626,6 +763,10 @@
                             setText(row, '.b5',  router.clients_5 || 0);
                             setText(row, '.load', fmtLoad(router.load1));
                             setText(row, '.upt',  fmtUptime(router.uptime));
+                            const rm24 = row.querySelector('.rm24');
+                            if (rm24) rm24.innerHTML = fmtRadioMini(router.ch_24, router.noise_24, router.bitrate_24);
+                            const rm5 = row.querySelector('.rm5');
+                            if (rm5)  rm5.innerHTML  = fmtRadioMini(router.ch_5,  router.noise_5,  router.bitrate_5);
                         });
                     }
 
@@ -703,6 +844,7 @@
                                             <span><i class="fas fa-broadcast-tower"></i> Ch ${s.channel || 'N/A'}</span>
                                             <span><i class="fas fa-lock"></i> ${s.encryption || 'Open'}</span>
                                         </div>
+                                        ${renderRadioMetrics(s, clients)}
                                         ${(clients.length > 0) ? `
                                             <table class="clients-table">
                                                 <thead>

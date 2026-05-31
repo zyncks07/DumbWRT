@@ -203,6 +203,18 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_wic_router ON wifi_iface_config(router_ip)")
 
+    # Migration: add radio health columns (noise floor, BSS bitrate, TX power).
+    # SQLite doesn't support IF NOT EXISTS on ALTER TABLE, so catch the duplicate error.
+    for _ddl in [
+        "ALTER TABLE interfaces ADD COLUMN noise INTEGER",
+        "ALTER TABLE interfaces ADD COLUMN bitrate INTEGER",
+        "ALTER TABLE interfaces ADD COLUMN txpower INTEGER",
+    ]:
+        try:
+            cur.execute(_ddl)
+        except sqlite3.OperationalError:
+            pass  # column already exists on existing DBs
+
     conn.commit()
     conn.close()
 
@@ -334,14 +346,17 @@ def save_snapshot(router_ip: str, hostname: str, interfaces: list[dict],
             cur.execute("""
                 INSERT INTO interfaces
                     (router_ip, interface, ssid, bssid, frequency, channel,
-                     bandwidth, mode, encryption, num_clients, last_updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     bandwidth, mode, encryption, num_clients,
+                     noise, bitrate, txpower, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(router_ip, interface) DO UPDATE SET
                     ssid=excluded.ssid, bssid=excluded.bssid,
                     frequency=excluded.frequency, channel=excluded.channel,
                     bandwidth=excluded.bandwidth, mode=excluded.mode,
                     encryption=excluded.encryption,
                     num_clients=excluded.num_clients,
+                    noise=excluded.noise, bitrate=excluded.bitrate,
+                    txpower=excluded.txpower,
                     last_updated=excluded.last_updated
             """, (
                 router_ip, iface["device"],
@@ -350,7 +365,11 @@ def save_snapshot(router_ip: str, hostname: str, interfaces: list[dict],
                 parse_bandwidth(info.get("htmode", "")),
                 info.get("mode", ""),
                 (info.get("encryption") or {}).get("description", "Open"),
-                len(clients), now,
+                len(clients),
+                info.get("noise"),
+                info.get("bitrate"),
+                info.get("txpower"),
+                now,
             ))
 
             cur.execute(

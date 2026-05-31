@@ -121,7 +121,13 @@ def api_routers():
             COALESCE(SUM(CASE WHEN i.frequency < 3000 THEN i.num_clients ELSE 0 END), 0) AS clients_24,
             COALESCE(SUM(CASE WHEN i.frequency >= 5000 THEN i.num_clients ELSE 0 END), 0) AS clients_5,
             sm.uptime, sm.load1, sm.load5, sm.load15,
-            sm.mem_total, sm.mem_used
+            sm.mem_total, sm.mem_used,
+            MIN(CASE WHEN i.frequency < 3000 THEN i.channel END) AS ch_24,
+            MIN(CASE WHEN i.frequency < 3000 THEN i.noise   END) AS noise_24,
+            MAX(CASE WHEN i.frequency < 3000 THEN i.bitrate END) AS bitrate_24,
+            MIN(CASE WHEN i.frequency >= 5000 THEN i.channel END) AS ch_5,
+            MIN(CASE WHEN i.frequency >= 5000 THEN i.noise   END) AS noise_5,
+            MAX(CASE WHEN i.frequency >= 5000 THEN i.bitrate END) AS bitrate_5
         FROM routers r
         LEFT JOIN interfaces i ON r.ip = i.router_ip
         LEFT JOIN (
@@ -199,6 +205,9 @@ def api_router_detail(router_ip):
                 'encryption': match.get('encryption'),
                 'num_clients': match.get('num_clients', 0),
                 'clients': match.get('clients', []),
+                'noise': match.get('noise'),
+                'bitrate': match.get('bitrate'),
+                'txpower': match.get('txpower'),
             })
         ssids.append(entry)
 
@@ -221,6 +230,9 @@ def api_router_detail(router_ip):
             'encryption': iface.get('encryption'),
             'num_clients': iface.get('num_clients', 0),
             'clients': iface.get('clients', []),
+            'noise': iface.get('noise'),
+            'bitrate': iface.get('bitrate'),
+            'txpower': iface.get('txpower'),
         })
 
     return jsonify({
