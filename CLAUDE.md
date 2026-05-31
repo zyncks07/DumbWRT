@@ -41,7 +41,7 @@ A web app that monitors WiFi clients across a fleet of OpenWrt routers (currentl
 ### Tables in `monitor.db`
 
 - `routers` — `ip` PK, `hostname`, `online`, `last_seen`, `first_seen`
-- `interfaces` — one row per radio interface per router; SSID, BSSID, freq, channel, bandwidth, mode, encryption, num_clients
+- `interfaces` — one row per radio interface per router; SSID, BSSID, freq, channel, bandwidth, mode, encryption, num_clients, **noise** (dBm), **bitrate** (kbit/s, BSS max rate), **txpower** (dBm). The three bold columns were added 2026-05-31 via a migration block in `init_db()` (try/except ALTER TABLE — safe to run repeatedly; follow this pattern for all future column additions).
 - `clients` — associated stations; MAC, signal, signal_avg, noise, rx/tx_rate, rx/tx_packets, rx/tx_bytes, connected_time, inactive, authorized, last_seen, first_seen
 
 **Important:** the `clients` table is destructive — every poll cycle does `DELETE FROM clients WHERE router_ip=? AND interface=?` and re-inserts. **No history is kept.** That's the single biggest cause of "rich data being discarded" that this project complains about.
@@ -176,7 +176,7 @@ Ordered by **impact / risk**. Don't reorder without good reason — earlier item
 ### P4 — UI overhaul (info density + theme)
 
 15. **Light/dark theme via CSS custom properties** on `<html data-theme="light|dark">`. Persist in `localStorage`. Default = `prefers-color-scheme`. Toggle in the header. **Done** — tokens in `static/theme.css`, toggle + FOUC handling in `static/theme.js` (plus a tiny inline pre-render script in each template's `<head>`). All templates' inline CSS now uses `var(--accent)` / `var(--fg)` / `var(--card-bg)` / etc. Toggle button (`#themeToggle`) is in every nav except login.html. A handful of subtle tints (rgba shadows on err/warn/ok buttons) remain hardcoded — fine in both modes, not worth chasing.
-16. **Dense router grid.** **Done** — `dashboard.html` renders a CSS-grid table (`.router-table` / `.router-th` / `.router-tr`) at 36 px row height. Columns: status dot, hostname, IP, total clients, 2.4G, 5G, load1, uptime, expand chevron. Click row toggles `.expanded` on both the `.router-tr` and the sibling `.router-detail` (existing per-router interface + client rendering reused unchanged). `/api/routers` was extended to return `clients_24`, `clients_5`, and the latest `load1/5/15` + `uptime` + `mem_*` from `system_metrics`. Smart rerender preserved: full HTML rebuild only when the router set changes; otherwise per-cell `setText`. Density toggle (`compact` vs `comfortable`) deferred — single row height for now.
+16. **Dense router grid.** **Done** — `dashboard.html` renders a CSS-grid table (`.router-table` / `.router-th` / `.router-tr`) at 36 px row height. **12 columns** (as of 2026-05-31): status dot, hostname, **2.4G Radio mini**, **5G Radio mini**, IP, total clients, 2.4G count, 5G count, load1, uptime, 24h reach strip, expand chevron. The two radio-mini cells (`.rm24`, `.rm5`) sit beside hostname and show a channel badge + colored noise dBm + colored rate (Mbps/Gbps) for quick cross-router comparison. Click row toggles `.expanded` on both the `.router-tr` and the sibling `.router-detail`. `/api/routers` returns `clients_24`, `clients_5`, `load1/5/15`, `uptime`, `mem_*`, plus `ch_24/noise_24/bitrate_24/ch_5/noise_5/bitrate_5` aggregated from the `interfaces` table. Smart rerender: full HTML rebuild only when router set changes; otherwise per-cell `setText` + `.innerHTML` for the radio-mini cells. Density toggle deferred.
 17. **Sortable / filterable clients table.** **Done as part of P2 #11** — same `/clients` page covers it. Virtualization deferred; at current scale (~30 clients) the table renders fast. If client count grows beyond ~300, add row virtualization (windowing).
 18. **Drop chart.js everywhere it appears.** If the monitor needs charts, use **uPlot** (~40 KB) or hand-rolled SVG sparklines. No more 250 KB chart libraries.
 
@@ -238,7 +238,7 @@ A focused bug hunt. Four fixes landed; record here so they aren't re-broken or r
 3. **SQLite had no WAL (robustness).** Now `PRAGMA journal_mode=WAL` in `init_db()`. See §3 DB note.
 4. **`/api/router-raw-data` interpolated the device name into a remote shell command (LOW/defensive).** Now whitelisted with `re.fullmatch(r'[A-Za-z0-9._-]+', device)` before use. `flask_app.py` `api_router_raw_data`.
 
-> **DEPLOY STATE:** the edits are on disk and `py_compile`-clean, but at the time of writing the services had **not** been restarted (this session lacked passwordless sudo). If `PRAGMA journal_mode;` on the live DB still returns `delete`, the new collector code (incl. WAL) has not been loaded yet — run `sudo systemctl restart openwrt-collector openwrt-dashboard`. Not committed to git either.
+> **DEPLOY STATE:** all four fixes committed in `5b9c23c` and services restarted. WAL is active (`PRAGMA journal_mode` returns `wal`).
 
 ### Not explored thoroughly (open territory for the next pass)
 
@@ -247,3 +247,35 @@ A focused bug hunt. Four fixes landed; record here so they aren't re-broken or r
 - **Concurrency under load not tested.** WAL should help, but the daily `VACUUM` in `retention.run_cleanup` still takes an exclusive lock; behaviour at the 30-router target during VACUUM/backup is unverified.
 - **`ping_interval` is a dead v1 key** — still written by the Config form and stored, but the asyncio collector never reads it (it only uses `poll_interval`). Harmless, but a candidate for removal.
 - **`api_reachability` first-segment inference** (assumes the pre-window state was the opposite of the first transition) is plausible but not validated against real `router_status_history` data.
+
+---
+
+## 9. Feature Pass — 2026-05-31 (radio health stats)
+
+Commit `da0c63e`. Three files changed, no regressions observed.
+
+### What was added
+
+**Collector (`ubus_collector.py`)**
+- `init_db()` migration: three new `INTEGER` columns on `interfaces` — `noise`, `bitrate`, `txpower` — added via try/except `ALTER TABLE` so existing DBs upgrade on next collector restart without a manual migration step. **Use this same pattern for all future column additions.**
+- `save_snapshot()`: the `interfaces` INSERT/UPDATE now stores `info.get('noise')`, `info.get('bitrate')`, `info.get('txpower')` from `ubus call iwinfo info` alongside the existing fields.
+
+**API (`flask_app.py`)**
+- `/api/routers`: aggregates six new per-band radio fields using conditional `MIN`/`MAX` over the `interfaces` JOIN — `ch_24`, `noise_24`, `bitrate_24`, `ch_5`, `noise_5`, `bitrate_5`. `MIN` on channel/noise (all SSIDs on the same physical radio report the same value so MIN/MAX are equivalent); `MAX` on bitrate.
+- `/api/router/<ip>`: the SSID entry `dict` built in `api_router_detail` now explicitly passes `noise`, `bitrate`, `txpower` through to the response (the `entry.update()` call has a hardcoded key list — new fields must be added there manually, they do **not** flow through automatically from `SELECT *`).
+
+**Dashboard (`templates/dashboard.html`)**
+- **Router list row** (quick-glance): two new grid cells `.rm24` / `.rm5` positioned immediately after `.hostname`. Each renders `fmtRadioMini(ch, noise, kbps)` — a channel badge pill + colored noise dBm + colored rate short-form. Color thresholds: noise ≤ −90 → green, ≤ −80 → amber, else red; rate ≥ 300 Mbps → green, ≥ 54 Mbps → amber, else red. The grid is now **12 columns**: `28px minmax(140px,1.4fr) 112px 112px 110px 60px 60px 60px 64px 90px 110px 28px`.
+- **Expanded interface card** (detail): `renderRadioMetrics(s, clients)` inserts a 5-tile strip between `interface-meta` and the clients table. Tiles: Channel (plain), Noise Floor (colored + 3 px bar), Avg Client SNR (computed from `clients` array as `avg(c.signal − c.noise)`, colored + bar), Radio Rate (colored + bar), TX Power (plain). Bars are hidden when value is null (e.g. no clients → no SNR bar).
+- Color helper functions added: `noiseClass`, `snrClass`, `bitrateClass`, `fmtKbps`, `fmtKbpsShort`, `fmtRadioMini`, `renderRadioMetrics`. All reuse the existing `.m-ok` / `.m-warn` / `.m-err` CSS classes.
+- Incremental update path uses `row.querySelector('.rm24/.rm5').innerHTML = fmtRadioMini(...)` — safe because all values are integers from the DB (no user-controlled strings).
+
+### Deploy state
+
+Committed `da0c63e`, pushed to `origin/main`. Services restarted. The new `interfaces` columns populate after the first collector poll post-restart; until then the radio cells show `—`.
+
+### Open territory
+
+- **`iwinfo info`.signal for an AP is always −1** (not applicable in Master mode) — it is intentionally not stored or displayed. If STA-mode monitoring is ever added, revisit.
+- **Radio mini cells use `innerHTML`** in the incremental path (safe today, but note it as an exception to the usual `setText` discipline — don't extend this pattern to user-controlled strings).
+- **Avg Client SNR disappears when there are no clients.** This is correct UX but means a newly-booted router shows `—` for SNR even though the radio is up. A future improvement could show the radio noise floor alone as a proxy.
