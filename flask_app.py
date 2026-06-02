@@ -9,8 +9,10 @@ import secrets
 import time
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import wraps
+from collections import defaultdict
+import threading
 
 import auth
 import backup
@@ -24,6 +26,10 @@ app = Flask(__name__,
             template_folder='/home/bulik/apps/openwrt-monitor/templates',
             static_folder='/home/bulik/apps/openwrt-monitor/static')
 
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
+app.config['SESSION_COOKIE_SAMESITE']    = 'Lax'
+app.config['SESSION_COOKIE_HTTPONLY']    = True
+
 try:
     app.secret_key = auth.get_secret_key()
 except (FileNotFoundError, KeyError):
@@ -36,6 +42,21 @@ except (FileNotFoundError, KeyError):
 DB_PATH = '/var/lib/openwrt-monitor/monitor.db'
 CONFIG_PATH = '/etc/openwrt-monitor/config.json'
 
+# --- Login security ---------------------------------------------------------
+_login_attempts: dict = defaultdict(list)
+_login_lock = threading.Lock()
+LOGIN_MAX    = 5
+LOGIN_WINDOW = 300  # seconds (5-minute window)
+
+
+def _get_client_ip() -> str:
+    """Return normalized IPv4 string; strips ::ffff: prefix from dual-stack sockets."""
+    ip = request.remote_addr or ''
+    if ip.startswith('::ffff:'):
+        ip = ip[7:]
+    return ip
+
+
 def login_required(f):
     """Decorator to require login"""
     @wraps(f)
@@ -44,6 +65,18 @@ def login_required(f):
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
+
+
+@app.before_request
+def check_ip_whitelist():
+    """Block requests from IPs not in the allowed list. /static/ is always exempt."""
+    if request.path.startswith('/static/'):
+        return
+    allowed = load_config().get('allowed_ips', [])
+    if not allowed:
+        return  # empty list = allow-all (failsafe — never locks the admin out)
+    if _get_client_ip() not in allowed:
+        return render_template('403.html', client_ip=_get_client_ip()), 403
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -78,16 +111,31 @@ def login():
 
 @app.route('/api/login', methods=['POST'])
 def api_login():
-    """Handle login"""
-    data = request.json
-    username = data.get('username')
-    password = data.get('password')
-    
+    """Handle login with per-IP rate limiting."""
+    data = request.json or {}
+    username = data.get('username', '')
+    password = data.get('password', '')
+    ip = _get_client_ip()
+    now = time.time()
+
+    with _login_lock:
+        _login_attempts[ip] = [t for t in _login_attempts[ip] if now - t < LOGIN_WINDOW]
+        if len(_login_attempts[ip]) >= LOGIN_MAX:
+            retry_after = int(LOGIN_WINDOW - (now - _login_attempts[ip][0]))
+            logger.warning("Rate-limited login from %s (%d attempts in %ds window)", ip, LOGIN_MAX, LOGIN_WINDOW)
+            return jsonify({'success': False, 'error': 'too_many_attempts',
+                            'retry_after': retry_after}), 429
+        _login_attempts[ip].append(now)
+
     if auth.verify(username, password):
+        with _login_lock:
+            _login_attempts.pop(ip, None)
+        logger.info("Successful login for '%s' from %s", username, ip)
         session['logged_in'] = True
         session.permanent = True
         return jsonify({'success': True})
     else:
+        logger.warning("Failed login attempt for user '%s' from %s", username, ip)
         return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
 
 @app.route('/logout')
@@ -95,6 +143,13 @@ def logout():
     """Logout"""
     session.pop('logged_in', None)
     return redirect(url_for('login'))
+
+
+@app.route('/api/client-ip')
+@login_required
+def api_client_ip():
+    """Return the caller's normalized IP — used by Settings UI to show current IP."""
+    return jsonify({'success': True, 'ip': _get_client_ip()})
 
 @app.route('/dashboard')
 @login_required
@@ -398,7 +453,7 @@ def api_config():
             config['routers'] = data.get('routers', [])
             # pfSense integration — only update when the form sends these keys
             # so that a POST from an older page version can't silently wipe them.
-            for _k in ('pfsense_url', 'pfsense_api_key'):
+            for _k in ('pfsense_url', 'pfsense_api_key', 'allowed_ips'):
                 if _k in data:
                     config[_k] = data[_k]
             save_config(config)
@@ -643,6 +698,65 @@ def api_router_raw_data(router_ip):
     except Exception as e:
         logger.error(f"Error fetching raw data from {router_ip}: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/security')
+@login_required
+def security_page():
+    return render_template('security.html')
+
+
+@app.route('/api/security/whitelist', methods=['GET', 'POST'])
+@login_required
+def api_security_whitelist():
+    config = load_config()
+    if request.method == 'GET':
+        return jsonify({'success': True, 'allowed_ips': config.get('allowed_ips', [])})
+    data = request.json or {}
+    config['allowed_ips'] = data.get('allowed_ips', config.get('allowed_ips', []))
+    save_config(config)
+    logger.info("IP whitelist updated by %s: %s", _get_client_ip(), config['allowed_ips'])
+    return jsonify({'success': True})
+
+
+@app.route('/api/security/login-events')
+@login_required
+def api_security_login_events():
+    import subprocess, re as _re
+    try:
+        result = subprocess.run(
+            ['journalctl', '-u', 'openwrt-dashboard', '-n', '500',
+             '--no-pager', '-o', 'short-iso'],
+            capture_output=True, text=True, timeout=5
+        )
+        events = []
+        for line in result.stdout.split('\n'):
+            if not line.strip():
+                continue
+            lower = line.lower()
+            if 'failed login attempt' in lower:
+                kind = 'failed'
+                m = _re.search(r"for user '([^']+)' from (\S+)", line)
+                user = m.group(1) if m else '?'
+                src  = m.group(2) if m else '?'
+            elif 'successful login' in lower:
+                kind = 'success'
+                m = _re.search(r"for '([^']+)' from (\S+)", line)
+                user = m.group(1) if m else '?'
+                src  = m.group(2) if m else '?'
+            elif 'rate-limited login' in lower:
+                kind = 'ratelimit'
+                m = _re.search(r"login from (\S+)", line)
+                user = '—'
+                src  = m.group(1) if m else '?'
+            else:
+                continue
+            ts = line.split(' ', 1)[0] if ' ' in line else ''
+            events.append({'ts': ts, 'kind': kind, 'user': user, 'ip': src})
+        return jsonify({'success': True, 'events': list(reversed(events))[:100]})
+    except Exception as e:
+        logger.error("Error fetching login events: %s", e)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/maintenance')
 @login_required

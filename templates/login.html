@@ -347,13 +347,18 @@
                 const data = await response.json();
                 
                 if (data.success) {
-                    // Login successful - server sets session cookie
-                    // Redirect to dashboard
                     window.location.href = '/dashboard';
+                } else if (response.status === 429) {
+                    const retryAfter = data.retry_after || 300;
+                    loginBtn.disabled = true;
+                    spinner.style.display = 'none';
+                    errorMessage.innerHTML = '<i class="fas fa-clock"></i> Too many failed attempts. Try again in ' + Math.ceil(retryAfter / 60) + ' minute(s).';
+                    errorMessage.style.display = 'block';
+                    setTimeout(() => { loginBtn.disabled = false; }, retryAfter * 1000);
                 } else {
-                    // Show error
                     loginBtn.disabled = false;
                     spinner.style.display = 'none';
+                    errorMessage.innerHTML = '<i class="fas fa-exclamation-circle"></i> Invalid username or password';
                     errorMessage.style.display = 'block';
                     document.getElementById('password').value = '';
                     document.getElementById('password').focus();

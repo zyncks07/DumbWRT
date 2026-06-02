@@ -400,6 +400,10 @@
                     <i class="fas fa-database"></i>
                     Maintenance
                 </a>
+                <a href="/security" class="btn">
+                    <i class="fas fa-shield-alt"></i>
+                    Security
+                </a>
                 <button id="themeToggle" class="btn" title="Toggle theme" aria-label="Toggle theme"></button>
                 <a href="/dashboard" class="btn">
                     <i class="fas fa-arrow-left"></i>
@@ -532,7 +536,7 @@
                 <div class="form-group">
                     <label class="form-label">New Password</label>
                     <input type="password" class="form-input" id="new_password" placeholder="Enter new password">
-                    <div class="help-text">Minimum 8 characters recommended</div>
+                    <div class="help-text">Minimum 12 characters required</div>
                 </div>
 
                 <div class="form-group">
@@ -590,6 +594,53 @@
                 </div>
             </div>
 
+            <!-- IP Access Control Card -->
+            <div class="card" style="margin-bottom: 15px;">
+                <div class="card-title">
+                    <i class="fas fa-lock"></i>
+                    IP Access Control
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Your Current IP</label>
+                    <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                        <span id="clientIpBadge" style="font-family:'Courier New',monospace; font-size:13px; color:var(--accent); background:var(--card-bg-3); padding:8px 12px; border-radius:6px; border:1px solid var(--border-b);">Loading...</span>
+                        <button class="btn-add" style="margin-top:0;" onclick="addClientIp()">
+                            <i class="fas fa-plus"></i> Add to list
+                        </button>
+                    </div>
+                    <div class="help-text">Click "Add to list" if your IP is not already in the whitelist below.</div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Allowed IPs (one per line)</label>
+                    <textarea class="form-input" id="allowed_ips" rows="6"
+                        placeholder="192.168.9.16&#10;192.168.9.3&#10;192.168.4.2&#10;127.0.0.1"
+                        style="resize:vertical; line-height:1.8;"></textarea>
+                    <div class="help-text">Only these IPs can reach the app. Leave <strong>empty</strong> to allow all IPs (failsafe — you cannot lock yourself out this way).</div>
+                </div>
+
+                <div class="alert alert-warning" style="display:block; margin-bottom:15px;">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <strong>Always confirm your IP is listed before saving.</strong>
+                    An empty list allows access from all IPs.
+                </div>
+
+                <button class="btn-save" onclick="saveIPWhitelist()" id="saveIpBtn" style="width:auto; padding:12px 24px;">
+                    <i class="fas fa-save"></i>
+                    Save IP Whitelist
+                </button>
+
+                <div class="alert alert-success" id="ipSuccessAlert" style="margin-top:10px; display:none;">
+                    <i class="fas fa-check-circle"></i>
+                    IP whitelist saved successfully.
+                </div>
+                <div class="alert alert-error" id="ipErrorAlert" style="margin-top:10px; display:none;">
+                    <i class="fas fa-exclamation-circle"></i>
+                    <span id="ipErrorText">Error saving whitelist</span>
+                </div>
+            </div>
+
         <!-- Save Actions -->
         <div class="card full-width">
             <div class="actions">
@@ -614,6 +665,7 @@
     <script>
         let routers = [];
         let currentSSHKey = '';
+        let _clientIp = '';
 
         function addRouter(ip = '') {
             routers.push(ip);
@@ -664,8 +716,13 @@
                 }
                 renderRouters();
 
-                // Load SSH public key
+                // Load IP whitelist
+                const ips = config.allowed_ips || [];
+                document.getElementById('allowed_ips').value = ips.join('\n');
+
+                // Load SSH public key and current client IP
                 loadSSHPublicKey();
+                loadClientIP();
             } catch (error) {
                 console.error('Error loading config:', error);
                 showError('Failed to load configuration');
@@ -768,8 +825,8 @@
                     showError('New passwords do not match');
                     return;
                 }
-                if (newPassword.length < 8) {
-                    showError('New password must be at least 8 characters');
+                if (newPassword.length < 12) {
+                    showError('New password must be at least 12 characters');
                     return;
                 }
                 passwordChange = {
@@ -822,6 +879,64 @@
                 showError('Error saving configuration: ' + error.message);
                 saveBtn.disabled = false;
                 saveBtn.innerHTML = '<i class="fas fa-save"></i> Save & Restart Services';
+            }
+        }
+
+        async function loadClientIP() {
+            try {
+                const res = await fetch('/api/client-ip');
+                const data = await res.json();
+                if (data.success) {
+                    _clientIp = data.ip;
+                    document.getElementById('clientIpBadge').textContent = data.ip;
+                }
+            } catch(e) {
+                document.getElementById('clientIpBadge').textContent = 'unavailable';
+            }
+        }
+
+        function addClientIp() {
+            if (!_clientIp) return;
+            const ta = document.getElementById('allowed_ips');
+            const lines = ta.value.split('\n').map(l => l.trim()).filter(Boolean);
+            if (!lines.includes(_clientIp)) {
+                lines.push(_clientIp);
+                ta.value = lines.join('\n');
+            }
+        }
+
+        async function saveIPWhitelist() {
+            const btn = document.getElementById('saveIpBtn');
+            const successAlert = document.getElementById('ipSuccessAlert');
+            const errorAlert = document.getElementById('ipErrorAlert');
+            successAlert.style.display = 'none';
+            errorAlert.style.display = 'none';
+
+            const ta = document.getElementById('allowed_ips');
+            const ips = ta.value.split('\n').map(l => l.trim()).filter(Boolean);
+
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> Saving...';
+
+            try {
+                const res = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ allowed_ips: ips })
+                });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    successAlert.style.display = 'block';
+                    setTimeout(() => { successAlert.style.display = 'none'; }, 3000);
+                } else {
+                    throw new Error(data.error || 'Save failed');
+                }
+            } catch(e) {
+                document.getElementById('ipErrorText').textContent = 'Error: ' + e.message;
+                errorAlert.style.display = 'block';
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-save"></i> Save IP Whitelist';
             }
         }
 

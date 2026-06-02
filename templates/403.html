@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Access Denied - OpenWrt Monitor</title>
+    <link rel="stylesheet" href="/static/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/static/theme.css">
+    <script>(function(){try{var t=localStorage.getItem('theme');var d=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.setAttribute('data-theme',t||(d?'dark':'light'))}catch(e){}})();</script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, var(--bg-0) 0%, #1a1f3a 50%, var(--bg-0) 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-a);
+            border-radius: 24px;
+            padding: 50px 40px;
+            width: 420px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            text-align: center;
+        }
+
+        .icon-wrap {
+            width: 72px;
+            height: 72px;
+            background: rgba(255, 71, 87, 0.15);
+            border: 2px solid rgba(255, 71, 87, 0.35);
+            border-radius: 20px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 32px;
+            color: var(--err);
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--err);
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            font-size: 13px;
+            color: var(--fg-muted);
+            margin-bottom: 25px;
+        }
+
+        .ip-box {
+            background: var(--card-bg-3);
+            border: 1px solid var(--border-b);
+            border-radius: 8px;
+            padding: 12px 16px;
+            font-family: 'Courier New', monospace;
+            font-size: 15px;
+            color: var(--warn);
+            margin-bottom: 20px;
+        }
+
+        .ip-label {
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--fg-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 4px;
+        }
+
+        .help {
+            font-size: 12px;
+            color: var(--fg-muted);
+            line-height: 1.6;
+            border-top: 1px solid var(--border-c);
+            padding-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon-wrap">
+            <i class="fas fa-ban"></i>
+        </div>
+        <h1>Access Denied</h1>
+        <p class="subtitle">Your IP address is not on the allowed list.</p>
+
+        <div class="ip-box">
+            <div class="ip-label">Your IP address</div>
+            {{ client_ip }}
+        </div>
+
+        <div class="help">
+            Contact your administrator to add<br>
+            <strong>{{ client_ip }}</strong> to the IP whitelist<br>
+            in the Settings page.
+        </div>
+    </div>
+    <script src="/static/theme.js"></script>
+</body>
+</html>

@@ -69,8 +69,8 @@ def change_password(current: str, new: str) -> tuple[bool, str]:
     except Argon2Error:
         return False, "Current password is incorrect"
 
-    if not new or len(new) < 4:
-        return False, "New password must be at least 4 characters"
+    if not new or len(new) < 12:
+        return False, "New password must be at least 12 characters"
 
     data["password_hash"] = _hasher.hash(new)
     _save(data)
