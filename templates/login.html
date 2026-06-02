@@ -9,276 +9,182 @@
     <script>(function(){try{var t=localStorage.getItem('theme');var d=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;document.documentElement.setAttribute('data-theme',t||(d?'dark':'light'))}catch(e){}})();</script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, var(--bg-0) 0%, #1a1f3a 50%, var(--bg-0) 100%);
+            background: var(--bg-0);
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
-            position: relative;
-            overflow: hidden;
+            padding: 24px;
         }
-        
-        /* Animated background */
-        .bg-animation {
-            position: absolute;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            z-index: 0;
-        }
-        
-        .bg-circle {
-            position: absolute;
-            border-radius: 50%;
-            background: radial-gradient(circle, var(--border-c) 0%, transparent 70%);
-            animation: float 20s infinite ease-in-out;
-        }
-        
-        .bg-circle:nth-child(1) {
-            width: 300px;
-            height: 300px;
-            top: 10%;
-            left: 10%;
-            animation-delay: 0s;
-        }
-        
-        .bg-circle:nth-child(2) {
-            width: 200px;
-            height: 200px;
-            top: 60%;
-            right: 15%;
-            animation-delay: 5s;
-        }
-        
-        .bg-circle:nth-child(3) {
-            width: 250px;
-            height: 250px;
-            bottom: 10%;
-            left: 50%;
-            animation-delay: 10s;
-        }
-        
-        @keyframes float {
-            0%, 100% { transform: translateY(0) translateX(0); }
-            25% { transform: translateY(-30px) translateX(20px); }
-            50% { transform: translateY(0) translateX(-20px); }
-            75% { transform: translateY(30px) translateX(10px); }
-        }
-        
+
         /* Login container */
         .login-container {
-            position: relative;
-            z-index: 1;
             background: var(--card-bg);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
             border: 1px solid var(--border-a);
-            border-radius: 24px;
-            padding: 50px 40px;
-            width: 400px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-            will-change: transform, opacity;
-            animation: slideUp 0.6s ease-out forwards;
+            border-radius: 12px;
+            padding: 40px 36px;
+            width: 100%;
+            max-width: 380px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
         }
-        
-        @keyframes slideUp {
-            from {
-                opacity: 0;
-                transform: translateY(30px) scale(0.95);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0) scale(1);
-            }
-        }
-        
+
         .logo {
             text-align: center;
-            margin-bottom: 35px;
+            margin-bottom: 32px;
         }
-        
+
         .logo-icon {
-            width: 70px;
-            height: 70px;
-            background: linear-gradient(135deg, var(--accent), var(--accent-2));
-            border-radius: 20px;
+            width: 56px;
+            height: 56px;
+            background: var(--accent);
+            border-radius: 12px;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            font-size: 32px;
-            color: var(--bg-0);
-            margin-bottom: 15px;
-            animation: pulse 3s infinite;
-        }
-        
-        @keyframes pulse {
-            0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(0, 212, 255, 0.7); }
-            50% { transform: scale(1.05); box-shadow: 0 0 0 10px rgba(0, 212, 255, 0); }
-        }
-        
-        .logo-title {
             font-size: 26px;
-            font-weight: 700;
-            background: linear-gradient(135deg, var(--accent), var(--accent-2));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-            margin-bottom: 5px;
+            color: var(--bg-0);
+            margin-bottom: 16px;
         }
-        
+
+        .logo-title {
+            font-size: 22px;
+            font-weight: 600;
+            color: var(--fg);
+            margin-bottom: 4px;
+        }
+
         .logo-subtitle {
-            font-size: 13px;
+            font-size: 12px;
             color: var(--fg-muted);
-            letter-spacing: 1px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
         }
-        
+
         .form-group {
-            margin-bottom: 25px;
+            margin-bottom: 20px;
             position: relative;
         }
-        
+
         .form-group label {
             display: block;
-            font-size: 12px;
+            font-size: 11px;
             font-weight: 600;
             color: var(--fg-muted);
-            margin-bottom: 8px;
+            margin-bottom: 6px;
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
-        
+
         .input-wrapper {
             position: relative;
         }
-        
+
         .input-icon {
             position: absolute;
-            left: 15px;
+            left: 14px;
             top: 50%;
             transform: translateY(-50%);
             color: var(--fg-muted);
-            font-size: 16px;
+            font-size: 14px;
         }
-        
+
         .form-input {
             width: 100%;
             background: var(--card-bg-3);
-            border: 2px solid var(--border-a);
-            border-radius: 12px;
-            padding: 14px 15px 14px 45px;
+            border: 1px solid var(--border-a);
+            border-radius: 8px;
+            padding: 12px 14px 12px 40px;
             color: var(--fg);
             font-size: 14px;
-            transition: all 0.3s;
+            transition: border-color 0.15s;
         }
-        
+
         .form-input:focus {
             outline: none;
             border-color: var(--accent);
-            background: rgba(10, 14, 39, 0.9);
-            box-shadow: 0 0 0 4px var(--border-c);
         }
-        
+
         .form-input::placeholder {
-            color: #5a6270;
+            color: var(--fg-muted);
+            opacity: 0.7;
         }
-        
+
         .btn-login {
             width: 100%;
-            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            background: var(--accent);
             border: none;
-            border-radius: 12px;
-            padding: 16px;
+            border-radius: 8px;
+            padding: 13px;
             color: var(--bg-0);
-            font-size: 15px;
-            font-weight: 700;
+            font-size: 14px;
+            font-weight: 600;
             cursor: pointer;
-            transition: all 0.3s;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            margin-top: 10px;
+            transition: opacity 0.15s;
+            margin-top: 6px;
             position: relative;
-            min-height: 52px;
+            min-height: 46px;
             display: flex;
             align-items: center;
             justify-content: center;
         }
-        
+
         .btn-login:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 30px rgba(0, 212, 255, 0.4);
+            opacity: 0.9;
         }
-        
-        .btn-login:active {
-            transform: translateY(0);
-        }
-        
+
         .btn-login:disabled {
-            opacity: 0.7;
+            opacity: 0.6;
             cursor: not-allowed;
         }
-        
+
         .btn-text {
             display: inline-block;
         }
-        
+
         .error-message {
-            background: rgba(255, 71, 87, 0.15);
+            background: rgba(255, 71, 87, 0.12);
             border: 1px solid rgba(255, 71, 87, 0.3);
-            border-radius: 10px;
-            padding: 12px 15px;
+            border-radius: 8px;
+            padding: 11px 14px;
             color: var(--err);
             font-size: 12px;
-            margin-bottom: 20px;
+            margin-bottom: 18px;
             display: none;
-            animation: shake 0.5s;
         }
-        
-        @keyframes shake {
-            0%, 100% { transform: translateX(0); }
-            25% { transform: translateX(-10px); }
-            75% { transform: translateX(10px); }
-        }
-        
+
         .footer {
             text-align: center;
-            margin-top: 30px;
+            margin-top: 28px;
             font-size: 11px;
-            color: #5a6270;
+            color: var(--fg-muted);
         }
-        
+
         .footer a {
             color: var(--accent);
             text-decoration: none;
         }
-        
-        /* Loading spinner */
+
+        /* Loading spinner (functional feedback only) */
         .spinner {
-            border: 3px solid rgba(255, 255, 255, 0.1);
-            border-top: 3px solid var(--bg-0);
+            border: 2px solid var(--border-b);
+            border-top-color: var(--bg-0);
             border-radius: 50%;
             width: 16px;
             height: 16px;
-            animation: spin 1s linear infinite;
+            animation: spin 0.7s linear infinite;
             position: absolute;
-            right: 20px;
+            right: 16px;
         }
-        
+
         @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
+            to { transform: rotate(360deg); }
         }
     </style>
 </head>
 <body>
-    <div class="bg-animation">
-        <div class="bg-circle"></div>
-        <div class="bg-circle"></div>
-        <div class="bg-circle"></div>
-    </div>
-    
     <div class="login-container">
         <div class="logo">
             <div class="logo-icon">
