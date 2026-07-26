@@ -193,6 +193,28 @@
         }
         .signal-fill.fair { background: var(--warn); }
         .signal-fill.poor { background: var(--err); }
+        .voucher-cell { line-height: 1.35; }
+        .voucher-code {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--fg);
+        }
+        .voucher-sub { font-size: 10px; color: var(--fg-muted); }
+        .voucher-rem.v-ok   { color: var(--ok); }
+        .voucher-rem.v-warn { color: var(--warn); }
+        .voucher-rem.v-err  { color: var(--err); }
+        .trusted-badge {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            background: rgba(0, 255, 136, 0.15);
+            color: var(--ok);
+            border: 1px solid var(--ok);
+        }
         .empty {
             padding: 40px;
             text-align: center;
@@ -245,10 +267,11 @@
                 <th data-key="tx_bytes" class="num">TX Total <span class="arrow">▼</span></th>
                 <th data-key="connected_time" class="num">Connected <span class="arrow">▼</span></th>
                 <th data-key="inactive" class="num">Inactive <span class="arrow">▼</span></th>
+                <th data-key="voucher_code">Active voucher <span class="arrow">▼</span></th>
             </tr>
         </thead>
         <tbody id="clientsBody">
-            <tr><td colspan="12" class="empty">Loading…</td></tr>
+            <tr><td colspan="13" class="empty">Loading…</td></tr>
         </tbody>
     </table>
 </div>
@@ -292,6 +315,51 @@ function signalClass(s) {
 function signalPct(s) {
     return Math.max(0, Math.min(100, ((s + 90) / 60) * 100));
 }
+function esc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function fmtClock(unixSec) {
+    if (!unixSec) return '—';
+    const d = new Date(unixSec * 1000);
+    return d.toLocaleString([], { month: 'short', day: 'numeric',
+                                  hour: '2-digit', minute: '2-digit' });
+}
+// Remaining time until a voucher session expires, derived live from the
+// server-computed expiry (allow_time + session_timeout). Green > 30 min,
+// amber under 30 min, red once expired.
+function fmtRemaining(expiryUnix) {
+    if (!expiryUnix) return { text: '—', cls: '' };
+    const rem = expiryUnix - Date.now() / 1000;
+    if (rem <= 0) return { text: 'expired', cls: 'v-err' };
+    const cls = rem > 1800 ? 'v-ok' : 'v-warn';
+    const h = Math.floor(rem / 3600);
+    const m = Math.floor((rem % 3600) / 60);
+    const text = h > 0 ? `${h}h ${m}m` : `${m}m`;
+    return { text, cls };
+}
+// Time since the captive-portal user's last activity (pf-state derived,
+// server field voucher_last_activity). Green if active in the last 2 min,
+// amber once idle > 30 min. Falls back to '—' when unknown.
+function fmtActivity(unixSec) {
+    if (!unixSec) return { text: '—', cls: '' };
+    const d = Math.max(0, Math.floor(Date.now() / 1000 - unixSec));
+    let text;
+    if (d < 60) text = d + 's ago';
+    else if (d < 3600) text = Math.floor(d / 60) + 'm ago';
+    else text = Math.floor(d / 3600) + 'h ' + Math.floor((d % 3600) / 60) + 'm ago';
+    const cls = d < 120 ? 'v-ok' : (d < 1800 ? '' : 'v-warn');
+    return { text, cls };
+}
+function hasVoucher(c) {
+    // The captive-portal `username` is the voucher code for voucher-auth
+    // sessions. Match authmethod case-insensitively; also accept a blank
+    // authmethod since this deployment's portal is voucher-only.
+    if (!c.voucher_code) return false;
+    const m = (c.voucher_authmethod || '').toLowerCase();
+    return m === '' || m.includes('voucher');
+}
 
 function clientKey(c, key) {
     switch (key) {
@@ -307,6 +375,7 @@ function clientKey(c, key) {
         case 'tx_bytes': return c.tx_bytes || 0;
         case 'connected_time': return c.connected_time || 0;
         case 'inactive': return c.inactive || 0;
+        case 'voucher_code': return hasVoucher(c) ? (c.voucher_code || '').toLowerCase() : '';
     }
     return '';
 }
@@ -324,6 +393,8 @@ function renderRows() {
             c.arp_hostname, c.arp_ip, c.mac,
             c.router_hostname, c.router_ip,
             c.ssid, c.interface,
+            hasVoucher(c) ? c.voucher_code : null,
+            c.trusted ? 'trusted' : null, c.trusted_descr,
         ].filter(Boolean).join(' ').toLowerCase();
         return hay.includes(q);
     });
@@ -342,7 +413,7 @@ function renderRows() {
 
     const body = $('clientsBody');
     if (filtered.length === 0) {
-        body.innerHTML = '<tr><td colspan="12" class="empty">No clients match the current filter.</td></tr>';
+        body.innerHTML = '<tr><td colspan="13" class="empty">No clients match the current filter.</td></tr>';
         return;
     }
     body.innerHTML = filtered.map(c => {
@@ -359,6 +430,22 @@ function renderRows() {
             : '<span class="muted">—</span>';
         const sigPct = signalPct(c.signal);
         const sigCls = signalClass(c.signal);
+        let voucherHtml = '<span class="muted">—</span>';
+        if (hasVoucher(c)) {
+            const rem = fmtRemaining(c.voucher_expiry);
+            const act = fmtActivity(c.voucher_last_activity);
+            voucherHtml = `<div class="voucher-cell">
+                    <div class="voucher-code" data-copy="${c.voucher_code}" data-copy-label="Voucher">${c.voucher_code}</div>
+                    <div class="voucher-sub">since ${fmtClock(c.voucher_start)}</div>
+                    <div class="voucher-sub voucher-rem ${rem.cls}">${rem.text} left</div>
+                    <div class="voucher-sub voucher-rem ${act.cls}">active ${act.text}</div>
+                </div>`;
+        } else if (c.trusted) {
+            voucherHtml = `<div class="voucher-cell">
+                    <span class="trusted-badge">TRUSTED</span>
+                    ${c.trusted_descr ? `<div class="voucher-sub">${esc(c.trusted_descr)}</div>` : ''}
+                </div>`;
+        }
         return `
             <tr>
                 <td class="identity">${ident}</td>
@@ -378,6 +465,7 @@ function renderRows() {
                 <td class="num mono">${fmtBytes(c.tx_bytes)}</td>
                 <td class="num">${fmtSeconds(c.connected_time)}</td>
                 <td class="num">${fmtSeconds(c.inactive)}</td>
+                <td>${voucherHtml}</td>
             </tr>
         `;
     }).join('');
@@ -428,7 +516,7 @@ document.querySelectorAll('#headRow th').forEach(th => {
             sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
         } else {
             sortState.key = key;
-            sortState.dir = (key === 'identity' || key === 'mac' || key === 'router' || key === 'ssid' || key === 'band') ? 'asc' : 'desc';
+            sortState.dir = (key === 'identity' || key === 'mac' || key === 'router' || key === 'ssid' || key === 'band' || key === 'voucher_code') ? 'asc' : 'desc';
         }
         updateHeaderArrows();
         renderRows();

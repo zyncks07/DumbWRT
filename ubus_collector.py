@@ -41,6 +41,11 @@ HISTORY_INTERVAL_DEFAULT = 300
 # Seconds between pfSense ARP-table pulls. pfSense's ARP cache itself
 # updates much faster than this, so 30s is a fine UX/load compromise.
 PFSENSE_ARP_INTERVAL_DEFAULT = 30
+# Seconds between pfSense captive-portal voucher-session pulls.
+PFSENSE_VOUCHER_INTERVAL_DEFAULT = 30
+# Seconds between pfSense allowed/pass-through MAC pulls. Admin-managed list
+# that changes rarely, so this polls much less often than voucher sessions.
+PFSENSE_TRUSTED_INTERVAL_DEFAULT = 300
 
 
 logging.basicConfig(
@@ -185,6 +190,38 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_arp_ip ON arp_entries(ip)")
 
+    # ---- pfSense captive-portal voucher sessions ----
+    # One row per currently-active captive-portal session, keyed by the
+    # client's (lowercased) MAC so /api/clients can LEFT JOIN clients.mac.
+    # This is a live snapshot: voucher_loop full-replaces the table each
+    # cycle, so no history/retention path is needed. voucher_code is the
+    # captive-portal `username` (the voucher for voucher-auth sessions);
+    # allow_time is the unix session start, session_timeout its length in s.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS voucher_sessions (
+            mac TEXT PRIMARY KEY,
+            ip TEXT,
+            voucher_code TEXT,
+            authmethod TEXT,
+            allow_time INTEGER,
+            session_timeout INTEGER,
+            last_activity INTEGER,
+            last_seen DATETIME NOT NULL
+        )
+    """)
+
+    # ---- pfSense captive-portal allowed / pass-through MACs ----
+    # Devices the admin whitelisted so they bypass the portal (no voucher).
+    # Keyed by lowercased MAC for the /api/clients JOIN; full-replaced each
+    # trusted_loop cycle. descr is the admin's friendly label.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trusted_macs (
+            mac TEXT PRIMARY KEY,
+            descr TEXT,
+            last_seen DATETIME NOT NULL
+        )
+    """)
+
     # ---- Configured wifi-iface sections from UCI (active or disabled) ----
     # Lets the UI surface configured-but-off SSIDs with a "disabled" badge
     # instead of just omitting them. Section is the UCI section name and
@@ -209,6 +246,8 @@ def init_db():
         "ALTER TABLE interfaces ADD COLUMN noise INTEGER",
         "ALTER TABLE interfaces ADD COLUMN bitrate INTEGER",
         "ALTER TABLE interfaces ADD COLUMN txpower INTEGER",
+        # last_activity added after voucher_sessions shipped without it.
+        "ALTER TABLE voucher_sessions ADD COLUMN last_activity INTEGER",
     ]:
         try:
             cur.execute(_ddl)
@@ -789,6 +828,157 @@ async def arp_loop(shutdown: asyncio.Event):
             pass
 
 
+def save_voucher_sessions(sessions: list[dict]):
+    """Full-replace the voucher_sessions table with the current active set.
+
+    Captive-portal sessions are a live snapshot (a device is either on an
+    active session or it isn't), so we DELETE + re-INSERT each cycle. This
+    is self-cleaning — expired/logged-out sessions vanish automatically —
+    and keeps the table tiny (one row per connected client), which matters
+    for the storage budget. MAC is lowercased to match the /api/clients
+    JOIN (lower(clients.mac) = voucher_sessions.mac).
+    """
+    now = datetime.now().isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM voucher_sessions")
+        for s in sessions:
+            mac = (s.get("mac") or "").lower()
+            if not mac:
+                continue
+
+            def _int(v):
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    return None
+
+            cur.execute("""
+                INSERT INTO voucher_sessions
+                    (mac, ip, voucher_code, authmethod, allow_time, session_timeout, last_activity, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(mac) DO UPDATE SET
+                    ip = excluded.ip,
+                    voucher_code = excluded.voucher_code,
+                    authmethod = excluded.authmethod,
+                    allow_time = excluded.allow_time,
+                    session_timeout = excluded.session_timeout,
+                    last_activity = excluded.last_activity,
+                    last_seen = excluded.last_seen
+            """, (
+                mac,
+                s.get("ip", "") or "",
+                s.get("username", "") or "",
+                s.get("authmethod", "") or "",
+                _int(s.get("allow_time")),
+                _int(s.get("session_timeout")),
+                _int(s.get("last_activity")),
+                now,
+            ))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def voucher_loop(shutdown: asyncio.Event):
+    """Pull pfSense captive-portal voucher sessions on a fixed interval.
+
+    Re-reads config each cycle (like arp_loop) so pfsense_url/pfsense_api_key
+    changes take effect without a restart. Uses the REST command_prompt
+    endpoint — the REST API has no captive-portal/voucher endpoint — so the
+    API key must hold the Command Prompt privilege for this to return data.
+    """
+    _warned_unconfigured = False
+    while not shutdown.is_set():
+        cfg = load_config()
+        url = cfg.get("pfsense_url", "")
+        key = cfg.get("pfsense_api_key", "")
+        interval = int(cfg.get("pfsense_voucher_interval", PFSENSE_VOUCHER_INTERVAL_DEFAULT))
+        try:
+            if url and key:
+                _warned_unconfigured = False
+                sessions = await pfsense.fetch_voucher_sessions(url, key)
+                save_voucher_sessions(sessions)
+                logger.info(f"pfSense voucher sessions: {len(sessions)} active")
+            else:
+                interval = max(interval, 300)
+                if not _warned_unconfigured:
+                    logger.warning(
+                        "pfSense voucher enrichment not configured — "
+                        "set pfsense_url and pfsense_api_key via Settings or config.json"
+                    )
+                    _warned_unconfigured = True
+        except Exception as e:
+            logger.error(f"voucher_loop error: {e}", exc_info=True)
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=interval)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+
+def save_trusted_macs(macs: list[dict]):
+    """Full-replace the trusted_macs table with the pass-through MAC list.
+
+    Like voucher_sessions, this is a snapshot mirror of pfSense state, so
+    DELETE + re-INSERT keeps it in sync (removals disappear automatically).
+    MAC lowercased to match the /api/clients JOIN.
+    """
+    now = datetime.now().isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM trusted_macs")
+        for m in macs:
+            mac = (m.get("mac") or "").lower()
+            if not mac:
+                continue
+            cur.execute("""
+                INSERT INTO trusted_macs (mac, descr, last_seen)
+                VALUES (?, ?, ?)
+                ON CONFLICT(mac) DO UPDATE SET
+                    descr = excluded.descr,
+                    last_seen = excluded.last_seen
+            """, (mac, m.get("descr", "") or "", now))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def trusted_loop(shutdown: asyncio.Event):
+    """Pull the pfSense captive-portal allowed/pass-through MAC list on a slow
+    interval. Same command_prompt transport and config-reread pattern as
+    voucher_loop; the list changes rarely so the default interval is long."""
+    _warned_unconfigured = False
+    while not shutdown.is_set():
+        cfg = load_config()
+        url = cfg.get("pfsense_url", "")
+        key = cfg.get("pfsense_api_key", "")
+        interval = int(cfg.get("pfsense_trusted_interval", PFSENSE_TRUSTED_INTERVAL_DEFAULT))
+        try:
+            if url and key:
+                _warned_unconfigured = False
+                macs = await pfsense.fetch_trusted_macs(url, key)
+                save_trusted_macs(macs)
+                logger.info(f"pfSense trusted MACs: {len(macs)} allowed")
+            else:
+                interval = max(interval, 300)
+                if not _warned_unconfigured:
+                    logger.warning(
+                        "pfSense trusted-MAC enrichment not configured — "
+                        "set pfsense_url and pfsense_api_key via Settings or config.json"
+                    )
+                    _warned_unconfigured = True
+        except Exception as e:
+            logger.error(f"trusted_loop error: {e}", exc_info=True)
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=interval)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+
 async def backup_loop(shutdown: asyncio.Event):
     """Daily SQLite snapshot + prune. Re-reads config each cycle so
     `backup_keep_days` changes take effect on the next run."""
@@ -850,6 +1040,8 @@ async def main():
     ]
     tasks.append(asyncio.create_task(retention_loop(shutdown), name="retention"))
     tasks.append(asyncio.create_task(arp_loop(shutdown), name="pfsense-arp"))
+    tasks.append(asyncio.create_task(voucher_loop(shutdown), name="pfsense-voucher"))
+    tasks.append(asyncio.create_task(trusted_loop(shutdown), name="pfsense-trusted"))
     tasks.append(asyncio.create_task(backup_loop(shutdown), name="backup"))
     await shutdown.wait()
     logger.info("Shutdown signaled; cancelling tasks")

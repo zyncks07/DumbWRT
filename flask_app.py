@@ -208,9 +208,18 @@ def api_router_detail(router_ip):
     interfaces = [dict(row) for row in cursor.fetchall()]
     for iface in interfaces:
         cursor.execute("""
-            SELECT c.*, a.ip AS arp_ip, a.hostname AS arp_hostname
+            SELECT c.*, a.ip AS arp_ip, a.hostname AS arp_hostname,
+                   v.voucher_code AS voucher_code,
+                   v.authmethod   AS voucher_authmethod,
+                   v.allow_time   AS voucher_start,
+                   v.last_activity AS voucher_last_activity,
+                   (v.allow_time + v.session_timeout) AS voucher_expiry,
+                   t.descr AS trusted_descr,
+                   (t.mac IS NOT NULL) AS trusted
             FROM clients c
             LEFT JOIN arp_entries a ON lower(c.mac) = a.mac
+            LEFT JOIN voucher_sessions v ON lower(c.mac) = v.mac
+            LEFT JOIN trusted_macs t ON lower(c.mac) = t.mac
             WHERE c.router_ip = ? AND c.interface = ?
             ORDER BY c.signal DESC
         """, (router_ip, iface['interface']))
@@ -307,7 +316,14 @@ def api_clients():
                i.ssid, i.frequency,
                r.hostname AS router_hostname,
                a.ip       AS arp_ip,
-               a.hostname AS arp_hostname
+               a.hostname AS arp_hostname,
+               v.voucher_code AS voucher_code,
+               v.authmethod   AS voucher_authmethod,
+               v.allow_time   AS voucher_start,
+               v.last_activity AS voucher_last_activity,
+               (v.allow_time + v.session_timeout) AS voucher_expiry,
+               t.descr AS trusted_descr,
+               (t.mac IS NOT NULL) AS trusted
         FROM clients c
         LEFT JOIN interfaces i
           ON c.router_ip = i.router_ip AND c.interface = i.interface
@@ -315,6 +331,10 @@ def api_clients():
           ON c.router_ip = r.ip
         LEFT JOIN arp_entries a
           ON lower(c.mac) = a.mac
+        LEFT JOIN voucher_sessions v
+          ON lower(c.mac) = v.mac
+        LEFT JOIN trusted_macs t
+          ON lower(c.mac) = t.mac
         ORDER BY c.signal DESC
     """)
     clients = [dict(row) for row in cursor.fetchall()]

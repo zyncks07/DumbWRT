@@ -166,7 +166,18 @@
         .interface-card.disabled-card {
             opacity: 0.6;
         }
-        
+        /* Per-band tint so 2.4 GHz vs 5 GHz radios are distinguishable at a
+           glance. Flat color layered over the theme card bg (works light+dark);
+           inset stripe reuses the app's band colors (cyan 2.4, green 5). */
+        .interface-card.band-24-card {
+            background: linear-gradient(rgba(0, 212, 255, 0.06), rgba(0, 212, 255, 0.06)), var(--card-bg-3);
+            box-shadow: inset 3px 0 0 var(--accent);
+        }
+        .interface-card.band-5-card {
+            background: linear-gradient(rgba(0, 255, 136, 0.09), rgba(0, 255, 136, 0.09)), var(--card-bg-3);
+            box-shadow: inset 3px 0 0 var(--accent-2);
+        }
+
         .interface-meta {
             display: flex;
             gap: 12px;
@@ -200,7 +211,19 @@
         .clients-table tr:hover {
             background: var(--border-d);
         }
-        
+
+        .trusted-badge {
+            display: inline-block;
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            background: rgba(0, 255, 136, 0.15);
+            color: var(--ok);
+            border: 1px solid var(--ok);
+        }
+
         .mac-address {
             font-family: 'Courier New', monospace;
             color: var(--accent);
@@ -363,13 +386,26 @@
             transform: rotate(90deg);
             color: var(--accent);
         }
+        /* Drop-down animation: the panel is always in the DOM as a CSS grid
+           whose single row animates 0fr -> 1fr, sliding open to the exact
+           content height with no JS. The inner wrapper is clipped while the
+           row is collapsed. Runs only on user click, not on data polls. */
         .router-detail {
-            display: none;
+            display: grid;
+            grid-template-rows: 0fr;
+            transition: grid-template-rows 0.24s ease;
+        }
+        .router-detail.expanded { grid-template-rows: 1fr; }
+        .router-detail-inner {
+            overflow: hidden;
+            min-height: 0;
             padding: 12px 16px;
             background: var(--card-bg-2);
             border-bottom: 1px solid var(--border-a);
         }
-        .router-detail.expanded { display: block; }
+        @media (prefers-reduced-motion: reduce) {
+            .router-detail { transition: none; }
+        }
 
         /* ---- Radio health metrics strip (per interface card) ---- */
         .radio-metrics {
@@ -558,6 +594,61 @@
             return `${s}s`;
         }
 
+        // ---- captive-portal voucher helpers (mirror templates/clients.html) ----
+        function hasVoucher(c) {
+            if (!c.voucher_code) return false;
+            const m = (c.voucher_authmethod || '').toLowerCase();
+            return m === '' || m.includes('voucher');
+        }
+        function fmtVoucherClock(unixSec) {
+            if (!unixSec) return '—';
+            const d = new Date(unixSec * 1000);
+            return d.toLocaleString([], { month: 'short', day: 'numeric',
+                                          hour: '2-digit', minute: '2-digit' });
+        }
+        // Remaining time until expiry (allow_time + session_timeout), derived
+        // live. Green > 30 min, amber under 30 min, red once expired.
+        function fmtVoucherRemaining(expiryUnix) {
+            if (!expiryUnix) return { text: '—', color: 'var(--fg-muted)' };
+            const rem = expiryUnix - Date.now() / 1000;
+            if (rem <= 0) return { text: 'expired', color: 'var(--err)' };
+            const color = rem > 1800 ? 'var(--ok)' : 'var(--warn)';
+            const h = Math.floor(rem / 3600);
+            const m = Math.floor((rem % 3600) / 60);
+            return { text: (h > 0 ? `${h}h ${m}m` : `${m}m`) + ' left', color };
+        }
+        // Time since captive-portal last activity (server voucher_last_activity).
+        function fmtVoucherActivity(unixSec) {
+            if (!unixSec) return { text: '—', color: 'var(--fg-muted)' };
+            const d = Math.max(0, Math.floor(Date.now() / 1000 - unixSec));
+            let text;
+            if (d < 60) text = d + 's ago';
+            else if (d < 3600) text = Math.floor(d / 60) + 'm ago';
+            else text = Math.floor(d / 3600) + 'h ' + Math.floor((d % 3600) / 60) + 'm ago';
+            const color = d < 120 ? 'var(--ok)' : (d < 1800 ? 'var(--fg-muted)' : 'var(--warn)');
+            return { text, color };
+        }
+        function vEsc(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+        function voucherCell(c) {
+            if (!hasVoucher(c)) {
+                if (c.trusted) {
+                    return `<span class="trusted-badge">TRUSTED</span>`
+                         + (c.trusted_descr ? `<div style="color:var(--fg-muted);font-size:0.85em">${vEsc(c.trusted_descr)}</div>` : '');
+                }
+                return '<span style="color:var(--fg-muted)">—</span>';
+            }
+            const rem = fmtVoucherRemaining(c.voucher_expiry);
+            const act = fmtVoucherActivity(c.voucher_last_activity);
+            return `<div style="font-family:'JetBrains Mono',monospace;font-weight:600" data-copy="${c.voucher_code}" data-copy-label="Voucher">${c.voucher_code}</div>`
+                 + `<div style="color:var(--fg-muted);font-size:0.85em">since ${fmtVoucherClock(c.voucher_start)}</div>`
+                 + `<div style="color:${rem.color};font-size:0.85em">${rem.text}</div>`
+                 + `<div style="color:${act.color};font-size:0.85em">active ${act.text}</div>`;
+        }
+
         function toggleRouter(routerIp) {
             const safeIP = routerIp.replace(/\./g, '_');
             const row = document.getElementById(`router-row-${safeIP}`);
@@ -732,7 +823,7 @@
                             const isExpanded = expandedRouters.has(router.ip);
                             html += renderRouterRow(router, safeIP, isExpanded);
                             html += `<div class="router-detail${isExpanded ? ' expanded' : ''}" id="router-detail-${safeIP}">
-                                <div class="loading"><div class="spinner"></div>Loading interfaces...</div>
+                                <div class="router-detail-inner"><div class="loading"><div class="spinner"></div>Loading interfaces...</div></div>
                             </div>`;
                         });
                         table.innerHTML = html;
@@ -781,11 +872,12 @@
                     if (!container) return; // Router was removed
 
                     if (ssids.length === 0) {
-                        container.innerHTML = '<div class="no-clients">No wireless interfaces found</div>';
+                        container.innerHTML = '<div class="router-detail-inner"><div class="no-clients">No wireless interfaces found</div></div>';
                         return;
                     }
 
                     container.innerHTML = `
+                        <div class="router-detail-inner">
                         <div class="interfaces-list">
                             ${ssids.map(s => {
                                 const badge = s.disabled
@@ -793,7 +885,10 @@
                                     : (s.active
                                         ? '<span class="ssid-badge active">Active</span>'
                                         : '');
-                                const cardCls = (s.disabled || !s.active) ? 'interface-card disabled-card' : 'interface-card';
+                                const bandCls = s.frequency
+                                    ? (s.frequency >= 5000 ? ' band-5-card' : (s.frequency < 3000 ? ' band-24-card' : ''))
+                                    : '';
+                                const cardCls = ((s.disabled || !s.active) ? 'interface-card disabled-card' : 'interface-card') + bandCls;
                                 const ifaceLabel = s.interface
                                     ? `${s.interface} · ${s.radio || ''}`
                                     : (s.radio || '');
@@ -844,6 +939,7 @@
                                                         <th>RX/TX Data</th>
                                                         <th>Connected</th>
                                                         <th>Inactive</th>
+                                                        <th>Active Voucher</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody>
@@ -877,6 +973,7 @@
                                                                     <td class="rate">${formatBytes(client.rx_bytes)} / ${formatBytes(client.tx_bytes)}</td>
                                                                     <td>${formatTime(client.connected_time)}</td>
                                                                     <td>${client.inactive ? client.inactive + 's' : 'Active'}</td>
+                                                                    <td>${voucherCell(client)}</td>
                                                                 </tr>
                                                             `;
                                                         }).join('')}
@@ -887,6 +984,7 @@
                                 `;
                             }).join('')}
                         </div>
+                        </div>
                     `;
                 })
                 .catch(err => {
@@ -894,7 +992,7 @@
                     const safeIP = routerIp.replace(/\./g, '_');
                     const container = document.getElementById(`router-detail-${safeIP}`);
                     if (container) {
-                        container.innerHTML = '<div class="no-clients">Error loading interface data</div>';
+                        container.innerHTML = '<div class="router-detail-inner"><div class="no-clients">Error loading interface data</div></div>';
                     }
                 });
         }
