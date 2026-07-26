@@ -43,6 +43,8 @@ A web app that monitors WiFi clients across a fleet of OpenWrt routers (currentl
 - `routers` — `ip` PK, `hostname`, `online`, `last_seen`, `first_seen`
 - `interfaces` — one row per radio interface per router; SSID, BSSID, freq, channel, bandwidth, mode, encryption, num_clients, **noise** (dBm), **bitrate** (kbit/s, BSS max rate), **txpower** (dBm). The three bold columns were added 2026-05-31 via a migration block in `init_db()` (try/except ALTER TABLE — safe to run repeatedly; follow this pattern for all future column additions).
 - `clients` — associated stations; MAC, signal, signal_avg, noise, rx/tx_rate, rx/tx_packets, rx/tx_bytes, connected_time, inactive, authorized, last_seen, first_seen
+- `voucher_sessions` — active captive-portal sessions from pfSense, keyed by lowercased `mac`. `voucher_code` (= CP `username`), `authmethod`, `allow_time` (unix session start), `session_timeout` (s), `last_activity` (unix, pf-state derived), `last_seen`. **Full-replaced each collector cycle** (live snapshot, not history). Added 2026-07-27 — see §12.
+- `trusted_macs` — captive-portal allowed / pass-through MAC list (devices that bypass the portal, no voucher). `mac` PK (lowercased), `descr` (admin label), `last_seen`. Full-replaced each cycle. Added 2026-07-27 — see §12.
 
 **Important:** the `clients` table is destructive — every poll cycle does `DELETE FROM clients WHERE router_ip=? AND interface=?` and re-inserts. **No history is kept.** That's the single biggest cause of "rich data being discarded" that this project complains about.
 
@@ -383,3 +385,45 @@ Unlike `history_retention_days` (read by the daily retention loop), `history_int
 
 - `arp_entries` cleanup uses the same `retention_days` window as history. Could make it a separate, longer window (e.g. 7 days) so rarely-seen devices don't lose their IP mapping overnight. Currently 1-day window matches history tables.
 - Maintenance UI does not warn that `history_interval` needs a service restart. A note or badge would improve UX.
+
+---
+
+## 12. Feature Pass — 2026-07-27 (captive-portal voucher / last-activity / trusted-MAC enrichment)
+
+Commit `09f13cb`. Five files. Surfaces pfSense captive-portal state per wifi client in a new **"Active Voucher"** column, on both the Clients page (`/clients`) and each router's expanded client table on the dashboard.
+
+### Key architectural finding (verified against package source)
+
+**The `pfSense-pkg-RESTAPI` v2 package has NO captive-portal or voucher endpoints.** There is no `/api/v2/.../voucher` analogous to `arp_table`. Confirmed: zero `CaptivePortal`/`Voucher` endpoint classes in the package. So voucher data cannot be pulled via a normal REST data endpoint.
+
+**Transport used instead:** `POST /api/v2/diagnostics/command_prompt` (the REST command-exec endpoint = GUI Diagnostics > Command Prompt), reusing the existing `pfsense_url` + `pfsense_api_key`. Request `{"command": "<fixed php>"}`, response `data.output` (stdout) + `data.result_code`. **Requires the pfSense API key/user to hold the "Diagnostics: Command Prompt" privilege** — without it the endpoint 403s and the columns stay blank (loops log a warning, no crash). Commands are static and app-controlled → no injection surface. This is the pattern to reuse for **any** pfSense data the REST API doesn't expose directly.
+
+### Data sources (all read-only on pfSense)
+
+- **Voucher sessions** — per-zone captive-portal SQLite DBs `/var/db/captiveportal<zone>.db`, table `captiveportal`. Columns: `username` = voucher code, `allow_time` = unix session start, `session_timeout` = length (s), `mac` = join key, `authmethod`. Read read-only via php `SQLite3` (pfSense has php always; the `sqlite3` CLI is not guaranteed).
+- **Last activity** — NOT a stored column. Derived live from the pf state table via pfSense's own `captiveportal_get_last_activity($ip)` (needs global `$cpzone` set + `require_once` of `config.inc` + `captiveportal.inc`). Zone recovered from the DB filename. This makes the voucher command heavier than a plain SQLite read (loads pfSense config/CP libs) but measured ~445 ms — lighter than the pre-existing ARP call.
+- **Trusted / allowed MACs** — pfSense config `captiveportal/<zone>/passthrumac` (array of `{action, mac, descr}`). Needs `config.inc` only (lighter than the voucher command). These devices bypass the portal (no voucher) → shown as a green **TRUSTED** badge.
+
+### Code map
+
+- **`pfsense.py`** — `VOUCHER_CMD` / `TRUSTED_CMD` constants (fixed php snippets), `fetch_voucher_sessions()` / `fetch_trusted_macs()` (parse one-JSON-per-line stdout), `_post_sync()` (POST sibling of `_fetch_sync`).
+- **`ubus_collector.py`** — `voucher_sessions` + `trusted_macs` tables (in `init_db()`); `last_activity` column added via the try/except ALTER-TABLE migration loop (the table shipped without it earlier the same day). `save_voucher_sessions()` / `save_trusted_macs()` **full-replace** each cycle (DELETE + re-INSERT → self-cleaning live snapshot, no retention/bloat, MAC lowercased for the JOIN). `voucher_loop` (`pfsense_voucher_interval`, default 30, **set to 60 in live config** to halve pfSense PHP spawns) and `trusted_loop` (`pfsense_trusted_interval`, default 300 — admin list changes rarely). Both registered in `main()`, both re-read config each cycle. **`pfsense_voucher_interval` / `pfsense_trusted_interval` are read at loop top each cycle**, so a config change takes effect next cycle without restart.
+- **`flask_app.py`** — `/api/clients` and `/api/router/<ip>` both `LEFT JOIN voucher_sessions v` and `LEFT JOIN trusted_macs t` on `lower(c.mac)`, exposing `voucher_code`, `voucher_authmethod`, `voucher_start`, `voucher_last_activity`, `voucher_expiry` (= allow_time+session_timeout, computed server-side), plus `trusted` (`t.mac IS NOT NULL`) and `trusted_descr`.
+- **`templates/clients.html` + `templates/dashboard.html`** — Active Voucher cell priority: **voucher** (code + activation + live "time left" + "active Ns ago" last-activity, all derived browser-side from the server timestamps) → **green TRUSTED badge** (+ admin descr) → **"—"**. `descr` is admin-entered free text so it is **HTML-escaped** (`esc()`/`vEsc()`) — the only client field that is; don't render it raw. Dashboard's `voucherCell()` mirrors the clients-page helpers.
+
+### Same-pass cosmetic changes (also in `09f13cb`)
+
+- **Per-band SSID card tint** (`dashboard.html`): `.band-24-card` (cyan) / `.band-5-card` (green) — a flat color layered over `var(--card-bg-3)` + an inset accent stripe, so 2.4 vs 5 GHz radios are distinguishable at a glance. Band from `s.frequency` (≥5000 = 5G, <3000 = 2.4G).
+- **Router drop-down animation** (`dashboard.html`): `.router-detail` is now a CSS grid animating `grid-template-rows: 0fr → 1fr` (slides to exact content height, no JS), with content wrapped in `.router-detail-inner` (`overflow:hidden`). **Fires only on the user's expand click, not on the 10s poll** (the poll only swaps innerHTML while already at `1fr`), so it respects the §6 "no animation on data updates" rule. Honors `prefers-reduced-motion`.
+
+### Resource impact (measured live, for reference)
+
+- **This box (Atom):** one voucher cycle = ~0.8 ms CPU (parse + WAL write). Net-new collector CPU **< 0.01% of a core** — the collector's ~19% is entirely SSH-polling 8 routers every 10s (`poll_interval`), unrelated.
+- **pfSense:** cost is PHP-spawn + `config.inc` parse (~250 ms + ~170 ms), not the query. Time-averaged net-new ≈ **~1.6% of one core** as sub-0.5 s bursts. Network ~15–20 MB/day. Biggest lever: `pfsense_voucher_interval` (raised to 60 → ~halves it). One inefficiency: `_post_sync`/`_fetch_sync` open a fresh TLS connection per call (no keep-alive) → ~3k handshakes/day.
+
+### Open territory
+
+- **MAC-join dependency:** all captive-portal enrichment joins on `lower(mac)` between the AP assoclist and pfSense. Holds for consistent MACs (incl. randomized ones within a session); a device whose CP `mac` is blank won't join. Same limitation as ARP enrichment.
+- **TLS keep-alive:** connection-per-call is the one measured inefficiency; a pooled/persistent HTTPS client would cut pfSense handshake CPU if ever needed.
+- **`authmethod` gate:** the UI treats a session as a voucher when `authmethod` contains "voucher" (case-insensitive) or is blank. Live data shows exactly `voucher`; revisit the gate if other CP auth methods (local/RADIUS) ever share the column.
+- **DHCP leases still unused** (see §10) — remains the next IP-enrichment improvement, independent of this pass.
