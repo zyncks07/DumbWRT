@@ -933,13 +933,13 @@
                                                     <tr>
                                                         <th>MAC Address</th>
                                                         <th>IP / Device</th>
+                                                        <th>Active Voucher</th>
                                                         <th>Signal</th>
                                                         <th>RX Rate</th>
                                                         <th>TX Rate</th>
                                                         <th>RX/TX Data</th>
                                                         <th>Connected</th>
                                                         <th>Inactive</th>
-                                                        <th>Active Voucher</th>
                                                     </tr>
                                                 </thead>
                                                 <tbody>
@@ -962,6 +962,7 @@
                                                                         ${client.mac}
                                                                     </td>
                                                                     <td class="mac-address">${ipCell}</td>
+                                                                    <td>${voucherCell(client)}</td>
                                                                     <td>
                                                                         <div class="signal-bar">
                                                                             <div class="signal-fill ${signalClass}" style="width: ${signalPercent}%"></div>
@@ -973,7 +974,6 @@
                                                                     <td class="rate">${formatBytes(client.rx_bytes)} / ${formatBytes(client.tx_bytes)}</td>
                                                                     <td>${formatTime(client.connected_time)}</td>
                                                                     <td>${client.inactive ? client.inactive + 's' : 'Active'}</td>
-                                                                    <td>${voucherCell(client)}</td>
                                                                 </tr>
                                                             `;
                                                         }).join('')}

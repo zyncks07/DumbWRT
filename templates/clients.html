@@ -280,6 +280,7 @@
                 <th data-key="mac">MAC <span class="arrow">▼</span></th>
                 <th data-key="router">Router <span class="arrow">▼</span></th>
                 <th data-key="ssid">SSID <span class="arrow">▼</span></th>
+                <th data-key="voucher_code">Active voucher <span class="arrow">▼</span></th>
                 <th data-key="band">Band / Channel <span class="arrow">▼</span></th>
                 <th data-key="signal">Signal <span class="arrow">▼</span></th>
                 <th data-key="rx_rate" class="num">RX <span class="arrow">▼</span></th>
@@ -288,7 +289,6 @@
                 <th data-key="tx_bytes" class="num">TX Total <span class="arrow">▼</span></th>
                 <th data-key="connected_time" class="num">Connected <span class="arrow">▼</span></th>
                 <th data-key="inactive" class="num">Inactive <span class="arrow">▼</span></th>
-                <th data-key="voucher_code">Active voucher <span class="arrow">▼</span></th>
             </tr>
         </thead>
         <tbody id="clientsBody">
@@ -488,6 +488,7 @@ function renderRows() {
                 <td class="mono muted">${c.mac ? `<span data-copy="${c.mac}" data-copy-label="MAC">${c.mac}</span>` : ''}</td>
                 <td>${c.router_hostname || c.router_ip || ''}</td>
                 <td>${c.ssid || '<span class="muted">—</span>'}</td>
+                <td>${voucherHtml}</td>
                 <td>${bandHtml}</td>
                 <td>
                     <div class="signal-cell">
@@ -501,7 +502,6 @@ function renderRows() {
                 <td class="num mono">${fmtBytes(c.tx_bytes)}</td>
                 <td class="num">${fmtSeconds(c.connected_time)}</td>
                 <td class="num">${fmtSeconds(c.inactive)}</td>
-                <td>${voucherHtml}</td>
             </tr>
         `;
     }).join('');
