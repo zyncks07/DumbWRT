@@ -313,7 +313,7 @@ def api_clients():
     cursor = conn.cursor()
     cursor.execute("""
         SELECT c.*,
-               i.ssid, i.frequency,
+               i.ssid, i.frequency, i.channel, i.bandwidth,
                r.hostname AS router_hostname,
                a.ip       AS arp_ip,
                a.hostname AS arp_hostname,

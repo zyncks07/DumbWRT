@@ -174,6 +174,27 @@
             color: var(--accent-2);
             border: 1px solid var(--accent-2);
         }
+        .band-cell {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            white-space: nowrap;
+        }
+        .ch-badge {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--fg-muted);
+        }
+        .bw-badge {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 10px;
+            padding: 1px 4px;
+            border-radius: 3px;
+            background: var(--card-bg-3);
+            border: 1px solid var(--border-a);
+            color: var(--fg-muted);
+        }
         .signal-cell {
             display: flex;
             align-items: center;
@@ -239,7 +260,7 @@
 
 <div class="toolbar">
     <label for="q">Filter</label>
-    <input type="text" id="q" placeholder="hostname, IP, MAC, router, SSID…">
+    <input type="text" id="q" placeholder="hostname, IP, MAC, router, SSID, ch 48…">
     <label for="band">Band</label>
     <select id="band">
         <option value="">All</option>
@@ -259,7 +280,7 @@
                 <th data-key="mac">MAC <span class="arrow">▼</span></th>
                 <th data-key="router">Router <span class="arrow">▼</span></th>
                 <th data-key="ssid">SSID <span class="arrow">▼</span></th>
-                <th data-key="band">Band <span class="arrow">▼</span></th>
+                <th data-key="band">Band / Channel <span class="arrow">▼</span></th>
                 <th data-key="signal">Signal <span class="arrow">▼</span></th>
                 <th data-key="rx_rate" class="num">RX <span class="arrow">▼</span></th>
                 <th data-key="tx_rate" class="num">TX <span class="arrow">▼</span></th>
@@ -367,7 +388,10 @@ function clientKey(c, key) {
         case 'mac':      return (c.mac || '').toLowerCase();
         case 'router':   return (c.router_hostname || c.router_ip || '').toLowerCase();
         case 'ssid':     return (c.ssid || '').toLowerCase();
-        case 'band':     return bandOf(c.frequency) || '';
+        // Group by band first, then by channel within the band. Channel is
+        // zero-padded so the string compare stays numeric (ch 6 before ch 48).
+        case 'band':     return (bandOf(c.frequency) || '') + '-' +
+                                String(c.channel || 0).padStart(3, '0');
         case 'signal':   return c.signal ?? -200;
         case 'rx_rate':  return c.rx_rate || 0;
         case 'tx_rate':  return c.tx_rate || 0;
@@ -375,7 +399,13 @@ function clientKey(c, key) {
         case 'tx_bytes': return c.tx_bytes || 0;
         case 'connected_time': return c.connected_time || 0;
         case 'inactive': return c.inactive || 0;
-        case 'voucher_code': return hasVoucher(c) ? (c.voucher_code || '').toLowerCase() : '';
+        // Sort the voucher column by recency of captive-portal activity, not by
+        // voucher code — "who used the network most recently" is the useful
+        // ordering. Trusted MACs have no session, so they rank below any
+        // voucher; clients with neither rank last (in the default desc dir).
+        case 'voucher_code':
+            if (hasVoucher(c)) return c.voucher_last_activity || c.voucher_start || 1;
+            return c.trusted ? 0 : -1;
     }
     return '';
 }
@@ -393,6 +423,8 @@ function renderRows() {
             c.arp_hostname, c.arp_ip, c.mac,
             c.router_hostname, c.router_ip,
             c.ssid, c.interface,
+            c.channel ? 'ch ' + c.channel : null,
+            c.bandwidth ? c.bandwidth + ' mhz' : null,
             hasVoucher(c) ? c.voucher_code : null,
             c.trusted ? 'trusted' : null, c.trusted_descr,
         ].filter(Boolean).join(' ').toLowerCase();
@@ -426,7 +458,11 @@ function renderRows() {
                 : `<div class="mono" data-copy="${c.mac}" data-copy-label="MAC">${c.mac}</div>`);
         const band = bandOf(c.frequency);
         const bandHtml = band
-            ? `<span class="band-badge band-${band}">${band === '24' ? '2.4 GHz' : '5 GHz'}</span>`
+            ? `<div class="band-cell">
+                    <span class="band-badge band-${band}">${band === '24' ? '2.4 GHz' : '5 GHz'}</span>
+                    ${c.channel ? `<span class="ch-badge">ch ${c.channel}</span>` : ''}
+                    ${c.bandwidth ? `<span class="bw-badge">${c.bandwidth} MHz</span>` : ''}
+                </div>`
             : '<span class="muted">—</span>';
         const sigPct = signalPct(c.signal);
         const sigCls = signalClass(c.signal);
@@ -516,7 +552,7 @@ document.querySelectorAll('#headRow th').forEach(th => {
             sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
         } else {
             sortState.key = key;
-            sortState.dir = (key === 'identity' || key === 'mac' || key === 'router' || key === 'ssid' || key === 'band' || key === 'voucher_code') ? 'asc' : 'desc';
+            sortState.dir = (key === 'identity' || key === 'mac' || key === 'router' || key === 'ssid' || key === 'band') ? 'asc' : 'desc';
         }
         updateHeaderArrows();
         renderRows();

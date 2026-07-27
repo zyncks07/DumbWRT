@@ -12,6 +12,7 @@ SQLite tables (routers, interfaces, clients).
 import asyncio
 import json
 import logging
+import re
 import signal
 import sqlite3
 import time
@@ -259,17 +260,26 @@ def init_db():
 
 
 def parse_bandwidth(htmode: str) -> Optional[int]:
+    """Channel width in MHz from iwinfo's `htmode` string.
+
+    Takes the width off the end of the token instead of matching each mode
+    name, so every generation's prefix works: HT (n), VHT (ac), HE (ax),
+    EHT (be). The old prefix list missed HE20/HE40 entirely — "HE20" does
+    not contain "HT20" — which is what OpenWrt 25.12 reports on the WiFi 6
+    APs, leaving their bandwidth NULL.
+    """
     if not htmode:
         return None
-    if "HT20" in htmode or "NOHT" in htmode:
+    mode = htmode.upper().strip()
+    if mode == "NOHT":
         return 20
-    if "HT40" in htmode or "VHT40" in htmode:
-        return 40
-    if "VHT80" in htmode or "HE80" in htmode:
-        return 80
-    if "VHT160" in htmode or "HE160" in htmode:
-        return 160
-    return None
+    if "80+80" in mode:
+        return 160  # two non-contiguous 80 MHz segments
+    m = re.search(r"(\d+)$", mode)
+    if not m:
+        return None
+    width = int(m.group(1))
+    return width if width in (20, 40, 80, 160, 320) else None
 
 
 def parse_router_arp(output: str) -> dict:
