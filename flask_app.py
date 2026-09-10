@@ -456,10 +456,13 @@ def api_bandwidth():
 
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT ip, bw_uplink FROM routers ORDER BY ip")
+    cur.execute("SELECT ip, bw_uplink, bw_uplink_src FROM routers ORDER BY ip")
     out = {
         row['ip']: {
             'uplink': row['bw_uplink'],
+            # How the uplink was chosen (gateway | override | traffic | none),
+            # surfaced so a mis-detection is visible from the dashboard.
+            'src': row['bw_uplink_src'],
             'in': [None] * buckets,
             'out': [None] * buckets,
             'peak': 0,

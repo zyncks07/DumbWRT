@@ -294,6 +294,8 @@ def init_db():
         "ALTER TABLE routers ADD COLUMN bw_out_bps INTEGER",
         "ALTER TABLE routers ADD COLUMN bw_uplink TEXT",
         "ALTER TABLE routers ADD COLUMN bw_updated INTEGER",
+        # How the uplink was chosen: gateway | override | traffic | none.
+        "ALTER TABLE routers ADD COLUMN bw_uplink_src TEXT",
     ]:
         try:
             cur.execute(_ddl)
@@ -417,33 +419,126 @@ def parse_topology(brif: str, carrier: str, phy: str) -> list[str]:
     return members
 
 
+def parse_gateway(output: str) -> tuple[Optional[str], Optional[str]]:
+    """Parse the `@@GW@@` line — "<gateway ip> <gateway mac>"."""
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            return parts[0], parts[1].lower()
+        if len(parts) == 1:
+            return parts[0], None  # default route, but the MAC isn't resolved
+    return None, None
+
+
+def parse_port_numbers(output: str) -> dict:
+    """Parse `grep -H . /sys/class/net/*/brif/*/port_no` into
+    {(bridge, port_no): member}.
+
+    The sysfs value is HEX ("0x1" ... "0xa") while `brctl showmacs` prints the
+    same port number in DECIMAL, so this converts to int for the join.
+    """
+    result = {}
+    for line in output.splitlines():
+        path, _, value = line.partition(":")
+        parts = path.strip().strip("/").split("/")
+        # /sys/class/net/<bridge>/brif/<member>/port_no
+        if len(parts) < 4 or parts[-1] != "port_no" or parts[-3] != "brif":
+            continue
+        try:
+            result[(parts[-4], int(value.strip(), 16))] = parts[-2]
+        except ValueError:
+            continue
+    return result
+
+
+def parse_fdb(output: str) -> list[tuple]:
+    """Parse the bridge-prefixed `brctl showmacs` lines into
+    [(bridge, port_no, mac, is_local, age)].
+
+    Columns after our sed prefix: bridge, port no, mac addr, is local?, ageing.
+    """
+    result = []
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        try:
+            port = int(parts[1])
+            age = float(parts[4]) if len(parts) > 4 else 0.0
+        except ValueError:
+            continue  # the "port no  mac addr ..." header, if it ever matches
+        result.append((parts[0], port, parts[2].lower(), parts[3] == "yes", age))
+    return result
+
+
+def gateway_ports(fdb: list[tuple], portno: dict,
+                  gw_mac: Optional[str]) -> list[str]:
+    """Bridge member names behind which the default gateway's MAC is learned.
+
+    Freshest first (smallest ageing timer), so that after a re-cable the new
+    port wins over the old entry still ageing out of the FDB.
+    """
+    if not gw_mac:
+        return []
+    hits = [
+        (age, portno[(bridge, port)])
+        for bridge, port, mac, is_local, age in fdb
+        # is_local rows are the bridge's own port MACs, never a path to anything.
+        if mac == gw_mac and not is_local and (bridge, port) in portno
+    ]
+    out = []
+    for _age, member in sorted(hits):
+        if member not in out:
+            out.append(member)
+    return out
+
+
 def pick_uplink(wired_up: list[str], counters: dict,
-                override: Optional[str] = None) -> tuple[Optional[str], list[str]]:
+                override: Optional[str] = None,
+                gw_ports: Optional[list[str]] = None
+                ) -> tuple[Optional[str], list[str], str]:
     """Choose the AP's uplink port group from its wired bridge ports.
 
     Members are grouped by physical parent (`eth1.9`/`eth1.11`/`eth1.12` all
     belong to `eth1`) because the ArcherC7 bridges VLAN sub-interfaces rather
-    than the port itself; the group is then scored by lifetime rx+tx and the
-    busiest one wins. On the APs that have a second wired port in use, that
+    than the port itself. On the APs that have a second wired port in use, that
     port is a daisy-chained downstream device whose traffic also crosses the
-    uplink — counting both would double it, so only the winning group counts.
+    uplink — counting both would double it, so only one group is ever chosen.
 
-    `override` is the parent name from config['bandwidth_uplink'] and skips
-    the heuristic entirely. Returns (group_name, [member ifaces]).
+    Three steps, in order of how much we trust them:
+
+    1. `override` — the parent name from config['bandwidth_uplink'].
+    2. `gw_ports` — the bridge ports the default gateway's MAC is learned on.
+       This is the real definition of "uplink": the port facing pfSense, i.e.
+       the internet path. It is derived, not inferred, and is correct on a
+       brand-new AP's first poll because it needs no traffic history.
+    3. Lifetime rx+tx — the original heuristic. Only reached when the gateway
+       isn't resolved yet (AP still booting) or sits behind a wireless port
+       (mesh backhaul), since a wireless member is never in `wired_up`.
+
+    Returns (group_name, [member ifaces], source).
     """
     groups: dict[str, list[str]] = {}
     for name in wired_up:
         groups.setdefault(name.split(".")[0], []).append(name)
     if not groups:
-        return None, []
+        return None, [], "none"
     if override and override in groups:
-        return override, groups[override]
+        return override, groups[override], "override"
+
+    for member in gw_ports or []:
+        parent = member.split(".")[0]
+        if parent in groups:
+            # Every wired member of that physical port counts, not just the one
+            # the gateway happened to be visible on: on the ArcherC7 the
+            # gateway shows up on eth1.9/eth1.11 but eth1.12 is the same cable.
+            return parent, groups[parent], "gateway"
 
     def score(members: list[str]) -> int:
         return sum(sum(counters.get(m, (0, 0))) for m in members)
 
     best = max(groups.items(), key=lambda kv: (score(kv[1]), kv[0]))
-    return best[0], best[1]
+    return best[0], best[1], "traffic"
 
 
 def counter_delta(prev: int, cur: int, elapsed: float) -> Optional[int]:
@@ -661,7 +756,7 @@ def mark_offline(router_ip: str):
         conn.close()
 
 
-def save_live_bandwidth(router_ip: str, uplink: Optional[str],
+def save_live_bandwidth(router_ip: str, uplink: Optional[str], src: str,
                         in_bps: Optional[int], out_bps: Optional[int]):
     """Store the instantaneous uplink rate on the routers row.
 
@@ -672,9 +767,9 @@ def save_live_bandwidth(router_ip: str, uplink: Optional[str],
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute(
-            "UPDATE routers SET bw_in_bps=?, bw_out_bps=?, bw_uplink=?, bw_updated=? "
-            "WHERE ip=?",
-            (in_bps, out_bps, uplink, int(time.time()), router_ip),
+            "UPDATE routers SET bw_in_bps=?, bw_out_bps=?, bw_uplink=?, "
+            "bw_uplink_src=?, bw_updated=? WHERE ip=?",
+            (in_bps, out_bps, uplink, src, int(time.time()), router_ip),
         )
         conn.commit()
     finally:
@@ -830,6 +925,24 @@ TOPO_SUFFIX = (
     "; echo '@@BRIF@@'; ls -d /sys/class/net/*/brif/* 2>/dev/null"
     "; echo '@@CARRIER@@'; grep -H . /sys/class/net/*/carrier 2>/dev/null"
     "; echo '@@PHY@@'; ls -d /sys/class/net/*/phy80211 2>/dev/null"
+    # Gateway path: which bridge port has the default gateway's MAC behind it.
+    # busybox `ip neigh show <addr>` IGNORES the address filter and dumps the
+    # whole table, so the address match has to be done here in awk.
+    "; echo '@@GW@@'"
+    "; gwip=$(ip route show default 2>/dev/null"
+    " | sed -n 's/^default via \\([^ ]*\\).*/\\1/p' | head -1)"
+    "; gwmac=$(ip neigh show 2>/dev/null"
+    " | awk -v g=\"$gwip\" '$1==g {for(i=1;i<=NF;i++) if($i==\"lladdr\") print $(i+1)}'"
+    " | head -1)"
+    "; echo \"$gwip $gwmac\""
+    "; echo '@@PORTNO@@'; grep -H . /sys/class/net/*/brif/*/port_no 2>/dev/null"
+    # Filter the FDB to the gateway MAC on the router: a busy bridge holds ~45
+    # entries and we only ever care about one of them.
+    "; echo '@@FDB@@'"
+    "; [ -n \"$gwmac\" ] && for b in /sys/class/net/*/bridge; do"
+    " bn=${b%/bridge}; bn=${bn##*/};"
+    " brctl showmacs \"$bn\" 2>/dev/null | grep -i \"$gwmac\" | sed \"s/^/$bn /\";"
+    " done"
 )
 
 
@@ -885,7 +998,7 @@ async def poll_once(conn: asyncssh.SSHClientConnection, router_ip: str,
     #  - /proc/net/dev byte counters for the uplink bandwidth graphs, plus
     #    the bridge/carrier/wireless topology when a refresh is due.
     counters = {}
-    wired_up = None
+    topology = None
     try:
         cmd = NETDEV_CMD + (TOPO_SUFFIX if fetch_topology else "")
         probe = await asyncio.wait_for(
@@ -902,16 +1015,25 @@ async def poll_once(conn: asyncssh.SSHClientConnection, router_ip: str,
             if sections.get("NETDEV"):
                 counters = parse_netdev(sections["NETDEV"])
             if fetch_topology and "BRIF" in sections:
-                wired_up = parse_topology(
-                    sections.get("BRIF", ""),
-                    sections.get("CARRIER", ""),
-                    sections.get("PHY", ""),
-                )
+                gw_ip, gw_mac = parse_gateway(sections.get("GW", ""))
+                topology = {
+                    "wired_up": parse_topology(
+                        sections.get("BRIF", ""),
+                        sections.get("CARRIER", ""),
+                        sections.get("PHY", ""),
+                    ),
+                    "gw_ip": gw_ip,
+                    "gw_ports": gateway_ports(
+                        parse_fdb(sections.get("FDB", "")),
+                        parse_port_numbers(sections.get("PORTNO", "")),
+                        gw_mac,
+                    ),
+                }
     except (asyncio.TimeoutError, asyncssh.Error):
         pass
 
     return (hostname, interfaces, system_info, len(devices), total_clients,
-            counters, wired_up)
+            counters, topology)
 
 
 async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
@@ -935,6 +1057,7 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
                                       BANDWIDTH_WINDOW_HOURS_DEFAULT)))
     uplink_group: Optional[str] = None
     uplink_ifaces: list[str] = []
+    uplink_src = "none"
     prev_counters: Optional[dict] = None
     prev_mono = 0.0
     bucket_start: Optional[int] = None
@@ -976,7 +1099,7 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
             write_history = (now_mono - last_history_mono) >= history_interval
             refresh_topo = (now_mono - last_topo_mono) >= TOPO_REFRESH_SECONDS
             (host, interfaces, system_info, n_dev, n_cli,
-             counters, wired_up) = await poll_once(
+             counters, topology) = await poll_once(
                 conn, router_ip,
                 fetch_system=write_history, fetch_topology=refresh_topo,
             )
@@ -986,7 +1109,7 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
                              datetime.now().isoformat())
                 last_history_mono = now_mono
 
-            if wired_up is not None:
+            if topology is not None:
                 last_topo_mono = now_mono
                 # Re-read the tunables on the same slow cadence, so changing
                 # them in config.json takes effect without a restart.
@@ -996,13 +1119,23 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
                 bw_window = max(1, int(cfg.get("bandwidth_window_hours",
                                                BANDWIDTH_WINDOW_HOURS_DEFAULT)))
                 override = (cfg.get("bandwidth_uplink") or {}).get(router_ip)
-                group, ifaces = pick_uplink(wired_up, counters, override)
-                if group != uplink_group:
+                group, ifaces, src = pick_uplink(
+                    topology["wired_up"], counters, override,
+                    topology["gw_ports"],
+                )
+                if (group, src) != (uplink_group, uplink_src):
+                    via = {
+                        "gateway": f"via gateway {topology['gw_ip']}",
+                        "override": "via config override",
+                        "traffic": "via busiest-port fallback"
+                                   " (gateway not on a wired port)",
+                        "none": "no wired bridge port",
+                    }[src]
                     logger.info(
                         f"{router_ip}: uplink={group or 'none'}"
-                        f" ({'+'.join(ifaces) if ifaces else 'no wired bridge port'})"
+                        f" ({'+'.join(ifaces) if ifaces else '-'}) {via}"
                     )
-                uplink_group, uplink_ifaces = group, ifaces
+                uplink_group, uplink_ifaces, uplink_src = group, ifaces, src
 
             if counters:
                 if prev_counters is not None and uplink_ifaces:
@@ -1023,7 +1156,7 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
                         d_tx += dtx
                     if usable:
                         save_live_bandwidth(
-                            router_ip, uplink_group,
+                            router_ip, uplink_group, uplink_src,
                             int(d_rx * 8 / elapsed), int(d_tx * 8 / elapsed),
                         )
                         # Buckets are wall-clock aligned so every router shares

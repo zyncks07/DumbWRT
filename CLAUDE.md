@@ -452,30 +452,67 @@ Two findings from probing all 8 APs drove that choice — don't re-litigate them
   devices on a second LAN port whose traffic also crosses the uplink
   (RGx60PRO `lan3` rx 15.2 GB ≈ `lan1` tx 15.7 GB). Only the uplink group counts.
 
-### Uplink auto-detection (`pick_uplink`)
+### Uplink auto-detection (`pick_uplink`) — three-step ladder
 
-Wired bridge ports = everything under `/sys/class/net/*/brif/*` that has no `phy80211`
-symlink and has `carrier == 1`. Those are grouped by physical parent
+Candidate ports are the wired bridge ports: everything under `/sys/class/net/*/brif/*`
+with no `phy80211` symlink and `carrier == 1`, grouped by physical parent
 (`name.split('.')[0]`, so ArcherC7's `eth1.9/.11/.12` → `eth1`, because it bridges VLAN
-sub-interfaces rather than the port), and the group with the highest lifetime rx+tx wins.
-Verified correct on all 8, live:
+sub-interfaces rather than the port itself). One group is then chosen:
 
-| AP | Uplink | Members summed |
-|---|---|---|
-| E314Nv2 (.244) | `eth1` | eth1 |
-| ArcherC7 (.246) | `eth1` | eth1.9 + eth1.11 + eth1.12 |
-| MiAX3000T (.249) | `lan4` | lan4 |
-| NewifiD2 (.250) | `lan2` | lan2 |
-| RGx60PRO (.251) | `lan1` | lan1 |
-| LinksysEA8100 (.248) | `lan1` | lan1 |
-| MR4A (.241) | `lan1` | lan1 |
-| UnifiACmesh (.245) | `eth0` | eth0 |
+1. **`config['bandwidth_uplink'][<router ip>]`** — manual override. Source `override`.
+2. **Gateway path** — the bridge port(s) where the **default gateway's MAC** is learned.
+   This is the real definition of the uplink: the port facing pfSense, i.e. the internet
+   path. Source `gateway`. All of the group's wired members are summed, not just the one
+   the gateway was visible on — on the ArcherC7 the gateway appears on `eth1.9`/`eth1.11`
+   but `eth1.12` is the same physical cable.
+3. **Highest lifetime rx+tx** — the original heuristic, now only a fallback. Source
+   `traffic`.
 
-Override with `config['bandwidth_uplink'] = {"<router ip>": "<parent iface>"}` if the
-heuristic ever misfires. The chosen uplink is logged at INFO on change and shown in the
-dashboard cell's tooltip. A deterministic alternative exists if needed — find the bridge
-port that learned the default gateway's MAC via `brctl showmacs` + `brif/*/port_no` — but
-it costs extra commands and the heuristic has been right on every AP.
+Verified live: all 8 APs resolve via step 2 against gateway `192.168.9.1`
+(`48:55:5f:42:69:07`).
+
+| AP | gw MAC learned on | → uplink | Members summed |
+|---|---|---|---|
+| E314Nv2 (.244) | `br-lan` port 1 | `eth1` | eth1 |
+| ArcherC7 (.246) | `br-vlan9` p1 + `br-vlan11` p1 | `eth1` | eth1.9 + eth1.11 + eth1.12 |
+| MiAX3000T (.249) | `br-lan` port 3 | `lan4` | lan4 |
+| NewifiD2 (.250) | `br-lan` port 2 | `lan2` | lan2 |
+| RGx60PRO (.251) | `br-lan` port 1 | `lan1` | lan1 |
+| LinksysEA8100 (.248) | `br-lan` port 1 | `lan1` | lan1 |
+| MR4A (.241) | `br-lan` port 1 | `lan1` | lan1 |
+| UnifiACmesh (.245) | `br-lan` port 1 | `eth0` | eth0 |
+
+**Why step 2 exists — do not demote it back to the heuristic.** The heuristic infers the
+uplink from accumulated traffic, so a **newly added or freshly reflashed AP has nothing to
+infer from**. Replaying the real fleet topology with an empty counters dict, the heuristic
+gets **3 of 8 wrong** (LinksysEA8100 → `lan4`, NewifiD2 → `lan3`, RGx60PRO → `lan4`);
+the gateway path gets all 8 right, because it needs no traffic history at all.
+
+**Adding a router is fully automatic.** Adding its IP in Settings restarts the collector
+(`POST /api/config`), which spawns its task, connects, and forces a topology probe on the
+first poll — so a new AP is measured correctly from its first bucket, wherever it is
+plugged in. Re-cabling an existing AP is picked up within `TOPO_REFRESH_SECONDS` (300 s);
+`gateway_ports()` sorts FDB hits by ageing timer so the freshly-learned port beats the
+stale entry still ageing out.
+
+The chosen uplink **and how it was chosen** are logged at INFO on change
+(`uplink=lan1 (lan1) via gateway 192.168.9.1`), stored in `routers.bw_uplink` /
+`bw_uplink_src`, and shown in the dashboard tooltip (`uplink lan1 (gateway path) · …`).
+A `traffic` source in that tooltip is the signal that gateway detection failed for that AP.
+
+### Two busybox gotchas in the gateway probe
+
+Both were hit for real while building this; the probe shape in `TOPO_SUFFIX` works around
+them and must not be "simplified":
+
+- **`ip neigh show <addr>` ignores the address filter on busybox** and dumps the entire
+  table. An early probe that trusted it produced a three-line "MAC" and silently mapped
+  the wrong ports. Hence the `awk '$1==g'` match.
+- **`brctl showmacs` prints port numbers in decimal, `/sys/.../brif/*/port_no` in hex**
+  (`0x1` … `0xa`). `parse_port_numbers` must parse with `int(value, 16)`.
+
+The FDB is also filtered to the gateway MAC **on the router** — a busy bridge holds ~45
+entries and only one matters, so the probe returns 2–3 lines.
 
 ### **GOTCHA: 32-bit counter wrap** (the most re-breakable thing here)
 
@@ -501,7 +538,8 @@ unambiguous — a genuine wrap inside 10 s would need > 3.4 Gbps.
     try/except ALTER-TABLE loop. `mark_offline()` NULLs the two rate columns, which is
     how the UI knows a rate is stale — **no clock arithmetic in the browser.**
   - Pure parsers, fixture-tested against all 8 APs: `parse_netdev`, `parse_topology`,
-    `pick_uplink`, `counter_delta`.
+    `parse_gateway`, `parse_port_numbers`, `parse_fdb`, `gateway_ports`, `pick_uplink`,
+    `counter_delta`.
   - `poll_once()` — the counters **ride the existing `ip neigh show` exec**
     (`NETDEV_CMD`), so sampling costs **zero extra SSH round trips**. `TOPO_SUFFIX` (3
     busybox forks) is appended only when the uplink needs re-picking:
@@ -515,8 +553,9 @@ unambiguous — a genuine wrap inside 10 s would need > 3.4 Gbps.
     ~(window / bucket) rows per router and never waits on the daily retention pass.
 - **`flask_app.py`** — `GET /api/bandwidth` returns two fixed-length bit/s arrays per
   router indexed by bucket, `null` for buckets with no row (renders as a gap, not a zero),
-  plus `peak` for the y-scale. `/api/routers` needed **no query change** — it already
-  does `SELECT r.*`, so the four new columns flow through automatically.
+  plus `peak` for the y-scale and `src` (how the uplink was picked). `/api/routers` needed
+  **no query change** — it already does `SELECT r.*`, so the five new columns flow through
+  automatically.
 - **`retention.py`** — `BANDWIDTH_TABLE` is kept **out of `HISTORY_TABLES`** (that loop
   deletes with an ISO cutoff; this table's `ts` is a unix int) and gets its own cutoff in
   `run_cleanup()` as a safety net for routers that stopped reporting.
@@ -541,7 +580,7 @@ unambiguous — a genuine wrap inside 10 s would need > 3.4 Gbps.
 |---|---|---|
 | `bandwidth_interval` | 120 | bucket length in seconds (240 points over 8 h) |
 | `bandwidth_window_hours` | 8 | history window; also the retention window |
-| `bandwidth_uplink` | — | `{"<ip>": "<iface>"}` manual uplink override |
+| `bandwidth_uplink` | — | `{"<ip>": "<iface>"}` manual uplink override — rarely needed now that detection is deterministic |
 
 `bandwidth_interval` / `bandwidth_window_hours` are re-read on the topology cadence
 (every 300 s), so changes apply without a collector restart — unlike `history_interval`
@@ -565,3 +604,25 @@ Row count is surfaced on the Maintenance page next to the other history tables.
   already fetched and could be reused there.
 - **No per-SSID or per-band traffic split** — the uplink is a single aggregate, and the
   wireless counters that would give a split are the inflated ones described above.
+- **A wireless-backhaul AP would fall back to the `traffic` source.** If the gateway MAC
+  is ever learned on a `phy*-ap*` port (mesh uplink), it is not in `wired_up` and the
+  ladder drops to step 3. No AP is in that state today; if one ever is, its "uplink"
+  traffic would have to come from the inflated wireless counters, so treat it as
+  unmeasurable rather than plumbing them in.
+
+### Topology finding — RGx60PRO is not a traffic trunk (measured 2026-09-11)
+
+The cabling was described as pfSense → RGx60PRO → switch hub → all other APs, which would
+mean RGx60PRO's uplink graph includes the whole fleet. **The traffic does not support
+that.** Over one 120 s window the 7 other APs pulled **12.355 Mbps** combined, while
+RGx60PRO's downstream ports (`lan3`+`lan4`) transmitted only **0.108 Mbps** — 100× short —
+and its own pfSense-facing `lan1` moved 0.175 Mbps. A hidden hardware-switch path is ruled
+out too: its CPU port totals equal the sum of its LAN ports exactly, so nothing is
+forwarded port-to-port behind the counters' back. RGx60PRO does learn the other APs' MACs
+on `lan4`, so the hub is cabled to it, but the hub evidently also reaches pfSense by its
+own path.
+
+Consequences: **no AP's graph is inflated by another AP's traffic**, so no pass-through
+subtraction is needed — each row already shows that AP's own internet traffic. Worth the
+operator re-checking the physical cabling though, since a hub with two paths toward
+pfSense is a switching loop waiting to matter.

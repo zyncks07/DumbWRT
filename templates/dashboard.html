@@ -662,10 +662,22 @@
                 <div class="bw-row out"><i class="fas fa-arrow-up"></i>${sparkPath(outPts, peak)}<span class="bw-v">${fmtBpsLabel(liveOut)}</span></div>`;
         }
 
+        // How the collector picked the uplink port, spelled out so a
+        // mis-detection is visible from the dashboard alone.
+        const BW_SRC = {
+            gateway:  'gateway path',
+            override: 'config override',
+            traffic:  'busiest port — gateway not seen on a wired port',
+            none:     'no wired bridge port',
+        };
+
         function bwTitle(ip, router) {
             const d = bwData[ip];
             const uplink = (router && router.bw_uplink) || (d && d.uplink) || '?';
-            return `uplink ${String(uplink).replace(/"/g, '')} · last ${bwWindowHours}h`
+            const src = (router && router.bw_uplink_src) || (d && d.src);
+            const how = BW_SRC[src] ? ` (${BW_SRC[src]})` : '';
+            return `uplink ${String(uplink).replace(/"/g, '')}${how}`
+                 + ` · last ${bwWindowHours}h`
                  + ` · peak ${fmtBps(d ? d.peak : 0)}bps`
                  + ` · now in ${fmtBps(liveBps(router, 'bw_in_bps'))}`
                  + ` / out ${fmtBps(liveBps(router, 'bw_out_bps'))}`;
