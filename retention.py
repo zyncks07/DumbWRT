@@ -23,7 +23,14 @@ HISTORY_TABLES = (
     "system_metrics",
 )
 
+# Kept out of HISTORY_TABLES on purpose: its `ts` is a unix INTEGER, not the
+# ISO string those tables use, so it needs its own cutoff. The collector
+# already trims it on every write (save_bandwidth_bucket) — this is a
+# safety net for rows left behind by a router that stopped reporting.
+BANDWIDTH_TABLE = "bandwidth_history"
+
 DEFAULT_RETENTION_DAYS = 1
+DEFAULT_BANDWIDTH_WINDOW_HOURS = 8
 DEFAULT_RAW_LOG_LINES = 500
 CLEANUP_INTERVAL_SECONDS = 86400  # daily
 
@@ -78,6 +85,14 @@ def run_cleanup(retention_days: int) -> dict:
                 rows_deleted += cur.rowcount
             # arp_entries uses last_seen (not ts) and has no other cleanup path.
             cur.execute("DELETE FROM arp_entries WHERE last_seen < ?", (cutoff,))
+            rows_deleted += cur.rowcount
+            # bandwidth_history keeps only its display window and stores ts as
+            # a unix int, so it gets its own cutoff rather than joining the
+            # ISO-string loop above.
+            bw_hours = int(_read_config().get(
+                "bandwidth_window_hours", DEFAULT_BANDWIDTH_WINDOW_HOURS))
+            bw_cutoff = int(time.time()) - bw_hours * 3600
+            cur.execute(f"DELETE FROM {BANDWIDTH_TABLE} WHERE ts < ?", (bw_cutoff,))
             rows_deleted += cur.rowcount
             conn.commit()
             # VACUUM cannot run inside a transaction.
@@ -157,7 +172,7 @@ def get_history_size() -> dict:
     conn = sqlite3.connect(DB_PATH)
     try:
         cur = conn.cursor()
-        for tbl in HISTORY_TABLES:
+        for tbl in HISTORY_TABLES + (BANDWIDTH_TABLE,):
             cur.execute(f"SELECT COUNT(*) FROM {tbl}")
             out[tbl] = cur.fetchone()[0]
     finally:

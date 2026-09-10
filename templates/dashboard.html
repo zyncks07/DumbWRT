@@ -294,7 +294,9 @@
         }
         .router-th, .router-tr {
             display: grid;
-            grid-template-columns: 28px minmax(140px, 1.4fr) 112px 112px 110px 60px 60px 60px 64px 90px 110px 28px;
+            /* Spare width goes to the traffic sparklines rather than the
+               hostname column, which only ever holds a short name. */
+            grid-template-columns: 28px minmax(120px, 0.5fr) minmax(168px, 1.5fr) 112px 112px 110px 60px 60px 60px 64px 90px 110px 28px;
             align-items: center;
             gap: 10px;
             padding: 0 14px;
@@ -317,6 +319,42 @@
             font-weight: 600;
         }
         .rm-val { font-weight: 600; }
+        /* ---- Uplink bandwidth sparklines (8h) ---- */
+        .bw-cell {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            gap: 2px;
+            min-width: 0;
+        }
+        .bw-row {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            height: 19px;
+            min-width: 0;
+        }
+        /* Icon + colour together, never colour alone. */
+        .bw-row i { font-size: 8px; width: 8px; flex: none; }
+        .bw-row.in  { color: var(--accent); }
+        .bw-row.out { color: var(--accent-2); }
+        .bw-spark {
+            flex: 1 1 auto;
+            min-width: 0;
+            height: 17px;
+            display: block;
+            background: var(--card-bg-3);
+            border-radius: 2px;
+        }
+        .bw-v {
+            flex: none;
+            width: 56px;
+            text-align: right;
+            font-size: 9px;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            color: var(--fg-muted);
+        }
         .reach-strip {
             height: 14px;
             border-radius: 3px;
@@ -339,7 +377,9 @@
         }
         .router-th .num { text-align: center; }
         .router-tr {
-            height: 36px;
+            /* 48px, not the original 36px: the row has to fit the two
+               stacked bandwidth sparklines. */
+            height: 48px;
             border-bottom: 1px solid var(--border-d);
             cursor: pointer;
             transition: background 0.1s;
@@ -539,6 +579,126 @@
                 return `<div class="seg ${cls}" style="width:${w}%"></div>`;
             }).join('');
             return `<div class="reach-strip">${parts}</div>`;
+        }
+
+        /* ---- Uplink bandwidth sparklines ---- */
+        let bwData = {};
+        let bwBuckets = 240;
+        let bwWindowHours = 8;
+
+        // Bare magnitude, for the tooltip where "bps" is spelled out once.
+        function fmtBps(bps) {
+            if (bps == null) return '—';
+            if (bps >= 1e9) return (bps / 1e9).toFixed(1) + 'G';
+            if (bps >= 1e6) return (bps / 1e6).toFixed(bps >= 1e7 ? 0 : 1) + 'M';
+            if (bps >= 1e3) return Math.round(bps / 1e3) + 'K';
+            return Math.round(bps) + '';
+        }
+
+        // Cell label — carries the unit so "42M" can't be read as bytes.
+        function fmtBpsLabel(bps) {
+            return bps == null ? '—' : fmtBps(bps) + 'bps';
+        }
+
+        // Hand-rolled SVG — no chart library (§6). One filled path per run of
+        // consecutive samples, so an offline gap renders as a gap.
+        function sparkPath(points, max) {
+            const n = points.length;
+            const H = 17;
+            // Square-root scale on a peak shared by IN and OUT. Linear would
+            // be honest but useless here: OUT runs ~10-20% of IN on these APs,
+            // so it would flatline against the shared scale. sqrt keeps the
+            // ordering (OUT still visibly smaller) while giving it shape. The
+            // exact magnitudes are the job of the number beside the graph.
+            const top = max > 0 ? Math.sqrt(max) : 0;
+            const scale = top > 0 ? (H - 1) / top : 0;
+            const y = v => +(H - 0.5 - Math.sqrt(v) * scale).toFixed(2);
+            let body = '';
+            let run = [];
+            const flush = () => {
+                if (!run.length) return;
+                // Single orphan sample: a 1-unit-wide bar, since a one-point
+                // path would draw nothing.
+                if (run.length === 1) {
+                    const [i, v] = run[0];
+                    body += `<rect x="${i}" y="${y(v)}" width="1" height="${+(H - y(v)).toFixed(2)}" fill-opacity="0.55"/>`;
+                } else {
+                    const line = run.map(([i, v], k) => `${k ? 'L' : 'M'}${i} ${y(v)}`).join('');
+                    // Area first, then the top edge on its own path, so the
+                    // baseline and the vertical closing edges aren't stroked.
+                    body += `<path d="${line}L${run[run.length - 1][0]} ${H}L${run[0][0]} ${H}Z" fill-opacity="0.55"/>`;
+                    body += `<path d="${line}" fill="none" stroke="currentColor" stroke-width="1"
+                                   stroke-opacity="0.95" stroke-linejoin="round"
+                                   vector-effect="non-scaling-stroke"/>`;
+                }
+                run = [];
+            };
+            for (let i = 0; i < n; i++) {
+                if (points[i] == null) { flush(); continue; }
+                run.push([i, points[i]]);
+            }
+            flush();
+            // preserveAspectRatio=none stretches the 240-unit-wide viewBox to
+            // whatever the column gives us; non-scaling-stroke above keeps the
+            // line 1px despite that anisotropic scale.
+            return `<svg class="bw-spark" viewBox="0 0 ${n} ${H}" preserveAspectRatio="none"
+                         fill="currentColor" stroke="none">${body}</svg>`;
+        }
+
+        function bwRows(ip, router) {
+            const d = bwData[ip];
+            const empty = new Array(d ? d.in.length : bwBuckets).fill(null);
+            const inPts = d ? d.in : empty;
+            const outPts = d ? d.out : empty;
+            // IN and OUT share the router's peak so the two are comparable
+            // to each other within a row.
+            const peak = d ? d.peak : 0;
+            // Live rate comes from /api/routers (10s); the sparkline itself
+            // only advances once per bucket.
+            const liveIn = liveBps(router, 'bw_in_bps');
+            const liveOut = liveBps(router, 'bw_out_bps');
+            return `
+                <div class="bw-row in"><i class="fas fa-arrow-down"></i>${sparkPath(inPts, peak)}<span class="bw-v">${fmtBpsLabel(liveIn)}</span></div>
+                <div class="bw-row out"><i class="fas fa-arrow-up"></i>${sparkPath(outPts, peak)}<span class="bw-v">${fmtBpsLabel(liveOut)}</span></div>`;
+        }
+
+        function bwTitle(ip, router) {
+            const d = bwData[ip];
+            const uplink = (router && router.bw_uplink) || (d && d.uplink) || '?';
+            return `uplink ${String(uplink).replace(/"/g, '')} · last ${bwWindowHours}h`
+                 + ` · peak ${fmtBps(d ? d.peak : 0)}bps`
+                 + ` · now in ${fmtBps(liveBps(router, 'bw_in_bps'))}`
+                 + ` / out ${fmtBps(liveBps(router, 'bw_out_bps'))}`;
+        }
+
+        function paintBw(ip, router) {
+            const cell = document.getElementById(`bw-${ip.replace(/\./g, '_')}`);
+            if (!cell) return;
+            cell.innerHTML = bwRows(ip, router);
+            cell.title = bwTitle(ip, router);
+        }
+
+        // No client-side clock arithmetic here on purpose: the collector
+        // nulls these columns in mark_offline(), and every poll either
+        // succeeds or marks the router offline, so `online` is the whole
+        // freshness test — and it can't be skewed by the browser's clock.
+        function liveBps(router, key) {
+            if (!router || router.online !== 1) return null;
+            return router[key] != null ? router[key] : null;
+        }
+
+        async function fetchBandwidth() {
+            try {
+                const r = await fetch('/api/bandwidth');
+                const d = await r.json();
+                if (!d.success) return;
+                bwData = d.routers || {};
+                bwBuckets = d.buckets || bwBuckets;
+                bwWindowHours = d.window_hours || bwWindowHours;
+                Object.keys(bwData).forEach(ip => paintBw(ip, currentRouterData[ip]));
+            } catch (e) {
+                console.error('bandwidth fetch failed', e);
+            }
         }
 
         async function fetchReachability() {
@@ -755,6 +915,7 @@
                      onclick="toggleRouter('${r.ip}')">
                     <div><span class="dot"></span></div>
                     <div class="hostname">${r.hostname || r.ip}</div>
+                    <div class="bw-cell" id="bw-${safeIP}" title="${bwTitle(r.ip, r)}">${bwRows(r.ip, r)}</div>
                     <div class="rm24">${fmtRadioMini(r.ch_24, r.noise_24, r.bitrate_24)}</div>
                     <div class="rm5">${fmtRadioMini(r.ch_5, r.noise_5, r.bitrate_5)}</div>
                     <div class="ip" data-copy="${r.ip}" data-copy-label="IP">${r.ip}</div>
@@ -806,6 +967,7 @@
                             <div class="router-th">
                                 <div></div>
                                 <div>Hostname</div>
+                                <div>Traffic ${bwWindowHours}h</div>
                                 <div>2.4G Radio</div>
                                 <div>5G Radio</div>
                                 <div>IP</div>
@@ -845,6 +1007,14 @@
                             if (rm24) rm24.innerHTML = fmtRadioMini(router.ch_24, router.noise_24, router.bitrate_24);
                             const rm5 = row.querySelector('.rm5');
                             if (rm5)  rm5.innerHTML  = fmtRadioMini(router.ch_5,  router.noise_5,  router.bitrate_5);
+                            // Only the live numbers move on the 10s poll — the
+                            // sparklines are rebuilt by fetchBandwidth() once
+                            // per bucket, so 240-point SVGs aren't re-serialised
+                            // six times a minute.
+                            setText(row, '.bw-row.in .bw-v',  fmtBpsLabel(liveBps(router, 'bw_in_bps')));
+                            setText(row, '.bw-row.out .bw-v', fmtBpsLabel(liveBps(router, 'bw_out_bps')));
+                            const bwCell = row.querySelector('.bw-cell');
+                            if (bwCell) bwCell.title = bwTitle(router.ip, router);
                         });
                     }
 
@@ -1015,8 +1185,9 @@
                 .catch(err => console.error('Error fetching stats:', err));
         }
 
-        // Initial load
-        fetchReachability().then(renderRouters);
+        // Initial load — both slow datasets first, so the strips and
+        // sparklines are populated on the very first row render.
+        Promise.all([fetchReachability(), fetchBandwidth()]).then(renderRouters);
         updateStats();
 
         // Auto-refresh every 10 seconds
@@ -1026,6 +1197,9 @@
         }, 10000);
         // Reachability changes slowly — refresh every 5 minutes.
         setInterval(fetchReachability, 5 * 60 * 1000);
+        // Bandwidth history gains one point per bucket (default 120s), so
+        // there is nothing new to fetch more often than that.
+        setInterval(fetchBandwidth, 2 * 60 * 1000);
     </script>
     <script src="/static/copy-utils.js"></script>
     <script src="/static/theme.js"></script>

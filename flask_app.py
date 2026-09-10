@@ -428,6 +428,75 @@ def api_reachability():
         'routers': out,
     })
 
+BANDWIDTH_BUCKET_DEFAULT = 120
+BANDWIDTH_WINDOW_HOURS_DEFAULT = 8
+
+
+@app.route('/api/bandwidth')
+@login_required
+def api_bandwidth():
+    """Per-router uplink throughput for the last `bandwidth_window_hours`.
+
+    Returns two fixed-length arrays of bit/s per router, indexed by bucket
+    so the client can render a sparkline without any timestamp maths.
+    `null` means no sample for that bucket (router offline) and renders as
+    a gap rather than a zero.
+    """
+    config = load_config()
+    interval = max(30, int(config.get('bandwidth_interval',
+                                      BANDWIDTH_BUCKET_DEFAULT)))
+    hours = max(1, int(config.get('bandwidth_window_hours',
+                                  BANDWIDTH_WINDOW_HOURS_DEFAULT)))
+    buckets = max(1, (hours * 3600) // interval)
+
+    # Align t0 to a bucket boundary — the collector aligns its buckets to
+    # wall-clock too, so indices line up exactly across all routers.
+    now_bucket = int(time.time()) // interval * interval
+    t0 = now_bucket - (buckets - 1) * interval
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT ip, bw_uplink FROM routers ORDER BY ip")
+    out = {
+        row['ip']: {
+            'uplink': row['bw_uplink'],
+            'in': [None] * buckets,
+            'out': [None] * buckets,
+            'peak': 0,
+        }
+        for row in cur.fetchall()
+    }
+
+    cur.execute(
+        "SELECT router_ip, ts, rx_bytes, tx_bytes, span FROM bandwidth_history "
+        "WHERE ts >= ? ORDER BY ts ASC",
+        (t0,),
+    )
+    for row in cur.fetchall():
+        entry = out.get(row['router_ip'])
+        span = row['span'] or 0
+        if entry is None or span <= 0:
+            continue
+        idx = (row['ts'] - t0) // interval
+        if not (0 <= idx < buckets):
+            continue
+        in_bps = int(row['rx_bytes'] * 8 / span)
+        out_bps = int(row['tx_bytes'] * 8 / span)
+        entry['in'][idx] = in_bps
+        entry['out'][idx] = out_bps
+        entry['peak'] = max(entry['peak'], in_bps, out_bps)
+    conn.close()
+
+    return jsonify({
+        'success': True,
+        'window_hours': hours,
+        'interval': interval,
+        'buckets': buckets,
+        't0': t0,
+        'routers': out,
+    })
+
+
 @app.route('/api/stats')
 @login_required
 def api_stats():

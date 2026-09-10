@@ -44,6 +44,7 @@ A web app that monitors WiFi clients across a fleet of OpenWrt routers (currentl
 - `interfaces` — one row per radio interface per router; SSID, BSSID, freq, channel, bandwidth, mode, encryption, num_clients, **noise** (dBm), **bitrate** (kbit/s, BSS max rate), **txpower** (dBm). The three bold columns were added 2026-05-31 via a migration block in `init_db()` (try/except ALTER TABLE — safe to run repeatedly; follow this pattern for all future column additions).
 - `clients` — associated stations; MAC, signal, signal_avg, noise, rx/tx_rate, rx/tx_packets, rx/tx_bytes, connected_time, inactive, authorized, last_seen, first_seen
 - `voucher_sessions` — active captive-portal sessions from pfSense, keyed by lowercased `mac`. `voucher_code` (= CP `username`), `authmethod`, `allow_time` (unix session start), `session_timeout` (s), `last_activity` (unix, pf-state derived), `last_seen`. **Full-replaced each collector cycle** (live snapshot, not history). Added 2026-07-27 — see §12.
+- `bandwidth_history` — per-router uplink throughput, one row per 2-minute bucket, 8 h deep. `ts` is a **unix INTEGER**, not the ISO string every other history table uses. Self-cleaning on write. Added 2026-09-10 — see §13.
 - `trusted_macs` — captive-portal allowed / pass-through MAC list (devices that bypass the portal, no voucher). `mac` PK (lowercased), `descr` (admin label), `last_seen`. Full-replaced each cycle. Added 2026-07-27 — see §12.
 
 **Important:** the `clients` table is destructive — every poll cycle does `DELETE FROM clients WHERE router_ip=? AND interface=?` and re-inserts. **No history is kept.** That's the single biggest cause of "rich data being discarded" that this project complains about.
@@ -427,3 +428,140 @@ Commit `09f13cb`. Five files. Surfaces pfSense captive-portal state per wifi cli
 - **TLS keep-alive:** connection-per-call is the one measured inefficiency; a pooled/persistent HTTPS client would cut pfSense handshake CPU if ever needed.
 - **`authmethod` gate:** the UI treats a session as a voucher when `authmethod` contains "voucher" (case-insensitive) or is blank. Live data shows exactly `voucher`; revisit the gate if other CP auth methods (local/RADIUS) ever share the column.
 - **DHCP leases still unused** (see §10) — remains the next IP-enrichment improvement, independent of this pass.
+
+---
+
+## 13. Feature Pass — 2026-09-10 (per-router uplink bandwidth graphs)
+
+Fleet was upgraded to **OpenWrt 25.12.5** just before this pass. Adds two stacked
+sparklines per router in the collapsed dashboard row — **Bandwidth IN** and **Bandwidth
+OUT** over the last 8 h — plus a live rate that ticks on the normal 10 s poll.
+
+### What is measured, and why
+
+**The AP's uplink ethernet port group.** `IN` = bytes the AP receives from the LAN
+(≈ client downloads), `OUT` = bytes it sends to the LAN (≈ client uploads).
+
+Two findings from probing all 8 APs drove that choice — don't re-litigate them:
+
+- **Wireless netdev counters are unusable.** E314Nv2 `phy0-ap0` tx reads 44.7 GB while its
+  only wired port `eth1` rx reads 2.1 GB; UnifiACmesh wireless tx totals 12.6 GB against
+  eth0 rx 4.09 GB. Inflated 3–10×. Ethernet counters are physical and cross-check exactly
+  (RGx60PRO `eth0` delta == `lan1`+`lan3`+`lan4` deltas).
+- **Summing every wired port double-counts.** RGx60PRO and LinksysEA8100 have daisy-chained
+  devices on a second LAN port whose traffic also crosses the uplink
+  (RGx60PRO `lan3` rx 15.2 GB ≈ `lan1` tx 15.7 GB). Only the uplink group counts.
+
+### Uplink auto-detection (`pick_uplink`)
+
+Wired bridge ports = everything under `/sys/class/net/*/brif/*` that has no `phy80211`
+symlink and has `carrier == 1`. Those are grouped by physical parent
+(`name.split('.')[0]`, so ArcherC7's `eth1.9/.11/.12` → `eth1`, because it bridges VLAN
+sub-interfaces rather than the port), and the group with the highest lifetime rx+tx wins.
+Verified correct on all 8, live:
+
+| AP | Uplink | Members summed |
+|---|---|---|
+| E314Nv2 (.244) | `eth1` | eth1 |
+| ArcherC7 (.246) | `eth1` | eth1.9 + eth1.11 + eth1.12 |
+| MiAX3000T (.249) | `lan4` | lan4 |
+| NewifiD2 (.250) | `lan2` | lan2 |
+| RGx60PRO (.251) | `lan1` | lan1 |
+| LinksysEA8100 (.248) | `lan1` | lan1 |
+| MR4A (.241) | `lan1` | lan1 |
+| UnifiACmesh (.245) | `eth0` | eth0 |
+
+Override with `config['bandwidth_uplink'] = {"<router ip>": "<parent iface>"}` if the
+heuristic ever misfires. The chosen uplink is logged at INFO on change and shown in the
+dashboard cell's tooltip. A deterministic alternative exists if needed — find the bridge
+port that learned the default gateway's MAC via `brctl showmacs` + `brif/*/port_no` — but
+it costs extra commands and the heuristic has been right on every AP.
+
+### **GOTCHA: 32-bit counter wrap** (the most re-breakable thing here)
+
+ath79/ag71xx (E314Nv2, ArcherC7, UnifiACmesh) keeps netdev byte counters in an
+`unsigned long` — **32-bit on mips32, so they wrap at 4 GiB**. Proof: ArcherC7's `eth1`
+rx reads 521 MB while its own VLAN child `eth1.11` (a software netdev with 64-bit stats)
+reads 84.5 GB. mediatek/ramips boxes are 64-bit. `counter_delta()` handles this: a
+negative delta where both readings are < 2^32 is a wrap (`+= 2^32`), anything else is a
+counter reset. A reset that *looks* like a wrap produces a ~4 GiB delta, which
+`MAX_PLAUSIBLE_BPS` (2.5 Gbps) then rejects. **Never "simplify" `counter_delta` to a plain
+subtraction.** Sampling every 10 s poll (not once per bucket) is what keeps this
+unambiguous — a genuine wrap inside 10 s would need > 3.4 Gbps.
+
+### Code map
+
+- **`ubus_collector.py`**
+  - `bandwidth_history` table. `ts` is a **unix INTEGER** (bucket start, wall-clock aligned
+    so every router shares boundaries) — deliberately *not* the ISO string the other
+    `*_history` tables use, because `/api/bandwidth` indexes buckets arithmetically.
+    `span` = seconds actually measured in that bucket (< bucket length if the AP was down
+    for part of it) and is what the API divides by to get bit/s.
+  - `routers.bw_in_bps` / `bw_out_bps` / `bw_uplink` / `bw_updated` added via the §9
+    try/except ALTER-TABLE loop. `mark_offline()` NULLs the two rate columns, which is
+    how the UI knows a rate is stale — **no clock arithmetic in the browser.**
+  - Pure parsers, fixture-tested against all 8 APs: `parse_netdev`, `parse_topology`,
+    `pick_uplink`, `counter_delta`.
+  - `poll_once()` — the counters **ride the existing `ip neigh show` exec**
+    (`NETDEV_CMD`), so sampling costs **zero extra SSH round trips**. `TOPO_SUFFIX` (3
+    busybox forks) is appended only when the uplink needs re-picking:
+    `TOPO_REFRESH_SECONDS` = 300, forced on every (re)connect. Sections are split on
+    `@@MARKER@@` lines by `_split_sections`.
+  - `run_router()` accumulates deltas in task-local state and flushes one row per bucket.
+    `prev_counters` is reset on every reconnect so an outage or reboot never becomes one
+    giant delta.
+  - `save_bandwidth_bucket()` **self-cleans on every write** (deletes outside the window),
+    the same live-snapshot philosophy as `voucher_sessions` — the table is pinned at
+    ~(window / bucket) rows per router and never waits on the daily retention pass.
+- **`flask_app.py`** — `GET /api/bandwidth` returns two fixed-length bit/s arrays per
+  router indexed by bucket, `null` for buckets with no row (renders as a gap, not a zero),
+  plus `peak` for the y-scale. `/api/routers` needed **no query change** — it already
+  does `SELECT r.*`, so the four new columns flow through automatically.
+- **`retention.py`** — `BANDWIDTH_TABLE` is kept **out of `HISTORY_TABLES`** (that loop
+  deletes with an ISO cutoff; this table's `ts` is a unix int) and gets its own cutoff in
+  `run_cleanup()` as a safety net for routers that stopped reporting.
+- **`templates/dashboard.html`** — grid is now **13 columns**, with the traffic column
+  (`minmax(168px,1.5fr)`) inserted after hostname and taking the spare width the hostname
+  column used to absorb (hostname dropped to `minmax(120px,0.5fr)`). `.router-tr` height
+  **36px → 48px** to fit two sparklines. `sparkPath()` is hand-rolled inline SVG — area
+  path plus a separate top-edge path carrying `vector-effect="non-scaling-stroke"`, which
+  is required because `preserveAspectRatio="none"` scales x and y differently. No chart
+  library (§6 / P4 #18). `fetchBandwidth()` runs on load and every 120 s — matching the
+  bucket period, since nothing new exists in between; the 10 s `/api/routers` pass only
+  patches the two live numbers, never re-serialises the 240-point SVGs.
+  - **The sparkline y-scale is `sqrt`, on a peak shared by IN and OUT.** OUT runs
+    ~10–20% of IN on this fleet, so a linear shared scale flatlines it into a
+    useless line; sqrt keeps OUT visibly smaller than IN while giving it readable
+    shape. Magnitudes are the job of the `fmtBpsLabel` number beside each graph
+    (which always carries the `bps` unit so "42M" can't be misread as bytes).
+
+### Config keys (all optional, all defaulted)
+
+| Key | Default | Effect |
+|---|---|---|
+| `bandwidth_interval` | 120 | bucket length in seconds (240 points over 8 h) |
+| `bandwidth_window_hours` | 8 | history window; also the retention window |
+| `bandwidth_uplink` | — | `{"<ip>": "<iface>"}` manual uplink override |
+
+`bandwidth_interval` / `bandwidth_window_hours` are re-read on the topology cadence
+(every 300 s), so changes apply without a collector restart — unlike `history_interval`
+(§11), which is still startup-only.
+
+### Storage
+
+240 points × 30 routers ≈ 7,200 rows ≈ 430 KB. Immaterial against the 420 MB budget.
+Row count is surfaced on the Maintenance page next to the other history tables.
+
+### Open territory
+
+- **Bucket-boundary attribution:** a 10 s delta that straddles a bucket boundary is
+  credited entirely to the new bucket (≤ 10 s of smear). `span` follows the bytes, so a
+  120 s bucket legitimately reports `span` of ~110–130 s and the bit/s figure stays
+  right; only the exact placement is approximate. Don't "fix" `span` to the bucket length.
+- **A collector restart discards the in-flight bucket** (the accumulator is task-local
+  memory). The bucket that was open gets re-opened post-restart with a short `span`, so
+  its rate is still correct — its byte total just covers less than the full 2 minutes.
+- **Expanded router detail** has no larger version of the graph — the sparkline data is
+  already fetched and could be reused there.
+- **No per-SSID or per-band traffic split** — the uplink is a single aggregate, and the
+  wireless counters that would give a split are the inflated ones described above.

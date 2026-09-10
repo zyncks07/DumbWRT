@@ -48,6 +48,22 @@ PFSENSE_VOUCHER_INTERVAL_DEFAULT = 30
 # that changes rarely, so this polls much less often than voucher sessions.
 PFSENSE_TRUSTED_INTERVAL_DEFAULT = 300
 
+# ---- Uplink bandwidth sampling ----
+# Byte counters are read every poll and accumulated in memory; one row per
+# router lands in bandwidth_history each bucket. 120s x 8h = 240 points.
+BANDWIDTH_BUCKET_DEFAULT = 120          # config['bandwidth_interval']
+BANDWIDTH_WINDOW_HOURS_DEFAULT = 8      # config['bandwidth_window_hours']
+# How often the bridge/carrier/wireless topology probe is re-run to
+# re-pick the uplink port. Cabling changes rarely; this is cheap insurance.
+TOPO_REFRESH_SECONDS = 300
+# ath79/ag71xx keeps its netdev byte counters in an unsigned long, which is
+# 32-bit on mips32 — eth1/eth0 on the ArcherC7, E314Nv2 and UnifiACmesh wrap
+# at 4 GiB. Deltas must be corrected for that.
+COUNTER_32BIT = 1 << 32
+# A delta implying more than this is a counter reset (reboot), not traffic.
+# The fastest uplink in the fleet is 2.5 GbE.
+MAX_PLAUSIBLE_BPS = 2_500_000_000
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -176,6 +192,29 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_sysmetrics_router_ts ON system_metrics(router_ip, ts)")
 
+    # ---- Uplink bandwidth history ----
+    # One row per router per bucket, holding the bytes that crossed the AP's
+    # uplink port group during that bucket. `ts` is a unix INTEGER (bucket
+    # start, wall-clock aligned so every router shares bucket boundaries) —
+    # deliberately NOT the ISO string the other *_history tables use, because
+    # /api/bandwidth buckets it arithmetically. retention.py handles it
+    # separately for exactly that reason.
+    # `span` is the number of seconds actually measured inside the bucket; it
+    # is < the bucket length when the router was offline for part of it, and
+    # is what the API divides by to get bit/s.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS bandwidth_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            router_ip TEXT NOT NULL,
+            rx_bytes INTEGER NOT NULL,
+            tx_bytes INTEGER NOT NULL,
+            span INTEGER NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_bw_router_ts ON bandwidth_history(router_ip, ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_bw_ts ON bandwidth_history(ts)")
+
     # ---- pfSense ARP cache (P2 #10) ----
     # MAC is canonicalised to lowercase so JOINs against clients.mac
     # (which is whatever case the AP reported) work via lower().
@@ -249,6 +288,12 @@ def init_db():
         "ALTER TABLE interfaces ADD COLUMN txpower INTEGER",
         # last_activity added after voucher_sessions shipped without it.
         "ALTER TABLE voucher_sessions ADD COLUMN last_activity INTEGER",
+        # Live uplink throughput, refreshed every poll so /api/routers (10s)
+        # can show a current number next to the 8h sparklines.
+        "ALTER TABLE routers ADD COLUMN bw_in_bps INTEGER",
+        "ALTER TABLE routers ADD COLUMN bw_out_bps INTEGER",
+        "ALTER TABLE routers ADD COLUMN bw_uplink TEXT",
+        "ALTER TABLE routers ADD COLUMN bw_updated INTEGER",
     ]:
         try:
             cur.execute(_ddl)
@@ -305,6 +350,119 @@ def parse_router_arp(output: str) -> dict:
         if mac and ip:
             result[mac] = ip
     return result
+
+
+def parse_netdev(output: str) -> dict:
+    """Parse `cat /proc/net/dev` stdout into {iface: (rx_bytes, tx_bytes)}.
+
+    Layout is two header lines then one line per interface:
+        eth1: <rx_bytes> <rx_packets> ... x8 | <tx_bytes> <tx_packets> ...
+    The name may butt straight up against the colon and the first number,
+    so split on the first ':' rather than on whitespace.
+    """
+    result = {}
+    for line in output.splitlines():
+        if ":" not in line:
+            continue  # the two header lines
+        name, _, rest = line.partition(":")
+        name = name.strip()
+        fields = rest.split()
+        if not name or len(fields) < 9:
+            continue
+        try:
+            result[name] = (int(fields[0]), int(fields[8]))
+        except ValueError:
+            continue
+    return result
+
+
+def parse_topology(brif: str, carrier: str, phy: str) -> list[str]:
+    """Work out which interfaces are wired bridge ports that are link-up.
+
+    Inputs are the raw stdout of, respectively:
+        ls -d /sys/class/net/*/brif/*      -> bridge membership
+        grep -H . /sys/class/net/*/carrier -> link state (path:value)
+        ls -d /sys/class/net/*/phy80211    -> which netdevs are wireless
+
+    Everything a bridge holds that is not a wireless netdev is a wired port;
+    carrier filters out the empty LAN sockets. Returns the wired, link-up
+    member names (e.g. ['lan1', 'lan3'] or ['eth1.9', 'eth1.11', 'eth1.12']).
+    """
+    wireless = set()
+    for line in phy.splitlines():
+        parts = line.strip().strip("/").split("/")
+        # /sys/class/net/<name>/phy80211
+        if len(parts) >= 2 and parts[-1] == "phy80211":
+            wireless.add(parts[-2])
+
+    carriers = {}
+    for line in carrier.splitlines():
+        path, _, value = line.partition(":")
+        parts = path.strip().strip("/").split("/")
+        if len(parts) >= 2 and parts[-1] == "carrier":
+            carriers[parts[-2]] = value.strip()
+
+    members = []
+    for line in brif.splitlines():
+        parts = line.strip().strip("/").split("/")
+        # /sys/class/net/<bridge>/brif/<member>
+        if len(parts) < 2 or parts[-2] != "brif":
+            continue
+        name = parts[-1]
+        if name in wireless or name in members:
+            continue
+        if carriers.get(name) != "1":
+            continue
+        members.append(name)
+    return members
+
+
+def pick_uplink(wired_up: list[str], counters: dict,
+                override: Optional[str] = None) -> tuple[Optional[str], list[str]]:
+    """Choose the AP's uplink port group from its wired bridge ports.
+
+    Members are grouped by physical parent (`eth1.9`/`eth1.11`/`eth1.12` all
+    belong to `eth1`) because the ArcherC7 bridges VLAN sub-interfaces rather
+    than the port itself; the group is then scored by lifetime rx+tx and the
+    busiest one wins. On the APs that have a second wired port in use, that
+    port is a daisy-chained downstream device whose traffic also crosses the
+    uplink — counting both would double it, so only the winning group counts.
+
+    `override` is the parent name from config['bandwidth_uplink'] and skips
+    the heuristic entirely. Returns (group_name, [member ifaces]).
+    """
+    groups: dict[str, list[str]] = {}
+    for name in wired_up:
+        groups.setdefault(name.split(".")[0], []).append(name)
+    if not groups:
+        return None, []
+    if override and override in groups:
+        return override, groups[override]
+
+    def score(members: list[str]) -> int:
+        return sum(sum(counters.get(m, (0, 0))) for m in members)
+
+    best = max(groups.items(), key=lambda kv: (score(kv[1]), kv[0]))
+    return best[0], best[1]
+
+
+def counter_delta(prev: int, cur: int, elapsed: float) -> Optional[int]:
+    """Bytes transferred between two counter readings, or None if unusable.
+
+    Handles the 32-bit wrap on ath79 (see COUNTER_32BIT). A wrap inside one
+    10s poll can only mean the counter just crossed 2^32, so the corrected
+    delta is small; a reboot instead yields a ~4 GiB "delta", which the
+    plausibility cap rejects.
+    """
+    d = cur - prev
+    if d < 0:
+        if prev < COUNTER_32BIT and cur < COUNTER_32BIT:
+            d += COUNTER_32BIT
+        else:
+            return None
+    if elapsed > 0 and (d * 8.0 / elapsed) > MAX_PLAUSIBLE_BPS:
+        return None
+    return d
 
 
 def parse_client(c: dict) -> dict:
@@ -492,6 +650,57 @@ def mark_offline(router_ip: str):
             VALUES (?, ?, 0, ?, ?)
             ON CONFLICT(ip) DO UPDATE SET online=0
         """, (router_ip, router_ip, now, now))
+        # Clear the live throughput so the dashboard shows "—" rather than
+        # the last rate seen before the AP dropped.
+        cur.execute(
+            "UPDATE routers SET bw_in_bps=NULL, bw_out_bps=NULL WHERE ip=?",
+            (router_ip,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def save_live_bandwidth(router_ip: str, uplink: Optional[str],
+                        in_bps: Optional[int], out_bps: Optional[int]):
+    """Store the instantaneous uplink rate on the routers row.
+
+    Kept on `routers` (rather than read back off bandwidth_history) so the
+    dashboard's existing 10s /api/routers poll carries a live number without
+    a second query — the sparkline data only lands once per bucket.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute(
+            "UPDATE routers SET bw_in_bps=?, bw_out_bps=?, bw_uplink=?, bw_updated=? "
+            "WHERE ip=?",
+            (in_bps, out_bps, uplink, int(time.time()), router_ip),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def save_bandwidth_bucket(router_ip: str, ts: int, rx: int, tx: int,
+                          span: int, window_hours: int):
+    """Append one closed bucket and drop anything outside the window.
+
+    Self-cleaning like voucher_sessions (§12): the table is pinned to the
+    display window on every write, so it never waits on the daily retention
+    pass and never grows past ~(window / bucket) rows per router.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO bandwidth_history (ts, router_ip, rx_bytes, tx_bytes, span) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (ts, router_ip, rx, tx, span),
+        )
+        cur.execute(
+            "DELETE FROM bandwidth_history WHERE router_ip=? AND ts < ?",
+            (router_ip, ts - window_hours * 3600),
+        )
         conn.commit()
     finally:
         conn.close()
@@ -613,8 +822,33 @@ async def fetch_system_info(conn: asyncssh.SSHClientConnection) -> Optional[dict
     }
 
 
+# Byte counters ride along with the ARP probe that poll_once already runs,
+# so sampling bandwidth costs no extra SSH round trip. The topology suffix
+# is appended only when the uplink needs re-picking (TOPO_REFRESH_SECONDS).
+NETDEV_CMD = "ip neigh show; echo '@@NETDEV@@'; cat /proc/net/dev"
+TOPO_SUFFIX = (
+    "; echo '@@BRIF@@'; ls -d /sys/class/net/*/brif/* 2>/dev/null"
+    "; echo '@@CARRIER@@'; grep -H . /sys/class/net/*/carrier 2>/dev/null"
+    "; echo '@@PHY@@'; ls -d /sys/class/net/*/phy80211 2>/dev/null"
+)
+
+
+def _split_sections(text: str) -> dict:
+    """Split the combined probe stdout on its @@MARKER@@ lines."""
+    sections = {"NEIGH": []}
+    current = "NEIGH"
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("@@") and stripped.endswith("@@"):
+            current = stripped.strip("@")
+            sections[current] = []
+            continue
+        sections.setdefault(current, []).append(line)
+    return {k: "\n".join(v) for k, v in sections.items()}
+
+
 async def poll_once(conn: asyncssh.SSHClientConnection, router_ip: str,
-                    fetch_system: bool = False):
+                    fetch_system: bool = False, fetch_topology: bool = False):
     hostname = router_ip
     try:
         r = await asyncio.wait_for(
@@ -643,21 +877,41 @@ async def poll_once(conn: asyncssh.SSHClientConnection, router_ip: str,
 
     save_snapshot(router_ip, hostname, interfaces, wifi_config)
 
-    # Supplement arp_entries from the router's own kernel ARP table.
-    # The AP sees ARP from every associated client before pfSense does,
-    # so this catches static-IP devices and ARP-expired pfSense entries.
-    # INSERT OR IGNORE means pfSense data always takes precedence.
+    # One exec covering two jobs:
+    #  - arp_entries supplement from the router's own kernel ARP table. The
+    #    AP sees ARP from every associated client before pfSense does, so
+    #    this catches static-IP devices and ARP-expired pfSense entries.
+    #    INSERT OR IGNORE means pfSense data always takes precedence.
+    #  - /proc/net/dev byte counters for the uplink bandwidth graphs, plus
+    #    the bridge/carrier/wireless topology when a refresh is due.
+    counters = {}
+    wired_up = None
     try:
-        neigh_result = await asyncio.wait_for(
-            conn.run("ip neigh show", check=False), timeout=COMMAND_TIMEOUT
+        cmd = NETDEV_CMD + (TOPO_SUFFIX if fetch_topology else "")
+        probe = await asyncio.wait_for(
+            conn.run(cmd, check=False), timeout=COMMAND_TIMEOUT
         )
-        if neigh_result.exit_status == 0 and neigh_result.stdout:
-            router_arp = parse_router_arp(neigh_result.stdout)
-            save_router_arp(router_ip, router_arp)
+        # Deliberately not gated on exit_status: this is a chain, so the
+        # status is only the last command's. A router with no bridge makes
+        # the topology `ls` fail, which must not discard the ARP table and
+        # counters that already came back fine.
+        if probe.stdout:
+            sections = _split_sections(probe.stdout)
+            if sections.get("NEIGH"):
+                save_router_arp(router_ip, parse_router_arp(sections["NEIGH"]))
+            if sections.get("NETDEV"):
+                counters = parse_netdev(sections["NETDEV"])
+            if fetch_topology and "BRIF" in sections:
+                wired_up = parse_topology(
+                    sections.get("BRIF", ""),
+                    sections.get("CARRIER", ""),
+                    sections.get("PHY", ""),
+                )
     except (asyncio.TimeoutError, asyncssh.Error):
         pass
 
-    return hostname, interfaces, system_info, len(devices), total_clients
+    return (hostname, interfaces, system_info, len(devices), total_clients,
+            counters, wired_up)
 
 
 async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
@@ -674,8 +928,26 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
     # Force a history write on the very first successful poll.
     last_history_mono = -float("inf")
 
+    # ---- uplink bandwidth accumulator (task-local: one task per router) ----
+    bw_bucket = max(30, int(config.get("bandwidth_interval",
+                                       BANDWIDTH_BUCKET_DEFAULT)))
+    bw_window = max(1, int(config.get("bandwidth_window_hours",
+                                      BANDWIDTH_WINDOW_HOURS_DEFAULT)))
+    uplink_group: Optional[str] = None
+    uplink_ifaces: list[str] = []
+    prev_counters: Optional[dict] = None
+    prev_mono = 0.0
+    bucket_start: Optional[int] = None
+    acc_rx = acc_tx = 0
+    acc_span = 0.0
+    # Force a topology probe on the first poll after every (re)connect.
+    last_topo_mono = -float("inf")
+
     while not shutdown.is_set():
         if conn is None:
+            # A reconnect may mean the AP rebooted; never delta across the gap.
+            prev_counters = None
+            last_topo_mono = -float("inf")
             try:
                 conn = await asyncssh.connect(
                     router_ip,
@@ -702,14 +974,77 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
         try:
             now_mono = time.monotonic()
             write_history = (now_mono - last_history_mono) >= history_interval
-            host, interfaces, system_info, n_dev, n_cli = await poll_once(
-                conn, router_ip, fetch_system=write_history
+            refresh_topo = (now_mono - last_topo_mono) >= TOPO_REFRESH_SECONDS
+            (host, interfaces, system_info, n_dev, n_cli,
+             counters, wired_up) = await poll_once(
+                conn, router_ip,
+                fetch_system=write_history, fetch_topology=refresh_topo,
             )
             logger.info(f"{router_ip} ({host}): {n_cli} clients across {n_dev} ifaces")
             if write_history:
                 save_history(router_ip, interfaces, system_info,
                              datetime.now().isoformat())
                 last_history_mono = now_mono
+
+            if wired_up is not None:
+                last_topo_mono = now_mono
+                # Re-read the tunables on the same slow cadence, so changing
+                # them in config.json takes effect without a restart.
+                cfg = load_config()
+                bw_bucket = max(30, int(cfg.get("bandwidth_interval",
+                                                BANDWIDTH_BUCKET_DEFAULT)))
+                bw_window = max(1, int(cfg.get("bandwidth_window_hours",
+                                               BANDWIDTH_WINDOW_HOURS_DEFAULT)))
+                override = (cfg.get("bandwidth_uplink") or {}).get(router_ip)
+                group, ifaces = pick_uplink(wired_up, counters, override)
+                if group != uplink_group:
+                    logger.info(
+                        f"{router_ip}: uplink={group or 'none'}"
+                        f" ({'+'.join(ifaces) if ifaces else 'no wired bridge port'})"
+                    )
+                uplink_group, uplink_ifaces = group, ifaces
+
+            if counters:
+                if prev_counters is not None and uplink_ifaces:
+                    elapsed = now_mono - prev_mono
+                    d_rx, d_tx, usable = 0, 0, elapsed > 0
+                    for name in uplink_ifaces:
+                        prev = prev_counters.get(name)
+                        curr = counters.get(name)
+                        if prev is None or curr is None:
+                            usable = False
+                            break
+                        drx = counter_delta(prev[0], curr[0], elapsed)
+                        dtx = counter_delta(prev[1], curr[1], elapsed)
+                        if drx is None or dtx is None:
+                            usable = False  # wrap-uncorrectable: counter reset
+                            break
+                        d_rx += drx
+                        d_tx += dtx
+                    if usable:
+                        save_live_bandwidth(
+                            router_ip, uplink_group,
+                            int(d_rx * 8 / elapsed), int(d_tx * 8 / elapsed),
+                        )
+                        # Buckets are wall-clock aligned so every router shares
+                        # boundaries and /api/bandwidth can index them directly.
+                        bucket = int(time.time()) // bw_bucket * bw_bucket
+                        if bucket_start is None:
+                            bucket_start = bucket
+                        elif bucket != bucket_start:
+                            if acc_span > 0:
+                                save_bandwidth_bucket(
+                                    router_ip, bucket_start, acc_rx, acc_tx,
+                                    int(round(acc_span)), bw_window,
+                                )
+                            bucket_start = bucket
+                            acc_rx = acc_tx = 0
+                            acc_span = 0.0
+                        acc_rx += d_rx
+                        acc_tx += d_tx
+                        acc_span += elapsed
+                prev_counters = counters
+                prev_mono = now_mono
         except (asyncssh.Error, OSError, asyncio.TimeoutError) as e:
             logger.warning(f"{router_ip}: poll failed ({e}); dropping connection")
             try:
