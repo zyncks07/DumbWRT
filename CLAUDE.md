@@ -44,7 +44,7 @@ A web app that monitors WiFi clients across a fleet of OpenWrt routers (currentl
 - `interfaces` — one row per radio interface per router; SSID, BSSID, freq, channel, bandwidth, mode, encryption, num_clients, **noise** (dBm), **bitrate** (kbit/s, BSS max rate), **txpower** (dBm). The three bold columns were added 2026-05-31 via a migration block in `init_db()` (try/except ALTER TABLE — safe to run repeatedly; follow this pattern for all future column additions).
 - `clients` — associated stations; MAC, signal, signal_avg, noise, rx/tx_rate, rx/tx_packets, rx/tx_bytes, connected_time, inactive, authorized, last_seen, first_seen
 - `voucher_sessions` — active captive-portal sessions from pfSense, keyed by lowercased `mac`. `voucher_code` (= CP `username`), `authmethod`, `allow_time` (unix session start), `session_timeout` (s), `last_activity` (unix, pf-state derived), `last_seen`. **Full-replaced each collector cycle** (live snapshot, not history). Added 2026-07-27 — see §12.
-- `bandwidth_history` — per-router uplink throughput, one row per 2-minute bucket, 8 h deep. `ts` is a **unix INTEGER**, not the ISO string every other history table uses. Self-cleaning on write. Added 2026-09-10 — see §13.
+- `bandwidth_history` — per-router uplink throughput **and associated-client count**, one row per 6-minute bucket, 24 h deep. `ts` is a **unix INTEGER**, not the ISO string every other history table uses. Self-cleaning on write. Added 2026-09-10; window/bucket widened and `clients` added 2026-09-14 — see §13 and §14.
 - `trusted_macs` — captive-portal allowed / pass-through MAC list (devices that bypass the portal, no voucher). `mac` PK (lowercased), `descr` (admin label), `last_seen`. Full-replaced each cycle. Added 2026-07-27 — see §12.
 
 **Important:** the `clients` table is destructive — every poll cycle does `DELETE FROM clients WHERE router_ip=? AND interface=?` and re-inserts. **No history is kept.** That's the single biggest cause of "rich data being discarded" that this project complains about.
@@ -437,6 +437,11 @@ Fleet was upgraded to **OpenWrt 25.12.5** just before this pass. Adds two stacke
 sparklines per router in the collapsed dashboard row — **Bandwidth IN** and **Bandwidth
 OUT** over the last 8 h — plus a live rate that ticks on the normal 10 s poll.
 
+> **Superseded in part by §14 (2026-09-14):** the window is now **24 h** on a **360 s**
+> bucket, the grid is **14 columns**, and `bandwidth_history` also carries a `clients`
+> count. Everything below about *how the uplink is found and measured* still stands
+> verbatim — only the window, bucket length and column layout moved.
+
 ### What is measured, and why
 
 **The AP's uplink ethernet port group.** `IN` = bytes the AP receives from the LAN
@@ -559,15 +564,16 @@ unambiguous — a genuine wrap inside 10 s would need > 3.4 Gbps.
 - **`retention.py`** — `BANDWIDTH_TABLE` is kept **out of `HISTORY_TABLES`** (that loop
   deletes with an ISO cutoff; this table's `ts` is a unix int) and gets its own cutoff in
   `run_cleanup()` as a safety net for routers that stopped reporting.
-- **`templates/dashboard.html`** — grid is now **13 columns**, with the traffic column
-  (`minmax(168px,1.5fr)`) inserted after hostname and taking the spare width the hostname
-  column used to absorb (hostname dropped to `minmax(120px,0.5fr)`). `.router-tr` height
+- **`templates/dashboard.html`** — grid is now **14 columns** (§14), with the traffic
+  column (`minmax(96px,0.75fr)`) inserted after hostname and taking the spare width the
+  hostname column used to absorb (hostname dropped to `minmax(120px,0.5fr)`). `.router-tr` height
   **36px → 48px** to fit two sparklines. `sparkPath()` is hand-rolled inline SVG — area
   path plus a separate top-edge path carrying `vector-effect="non-scaling-stroke"`, which
   is required because `preserveAspectRatio="none"` scales x and y differently. No chart
-  library (§6 / P4 #18). `fetchBandwidth()` runs on load and every 120 s — matching the
-  bucket period, since nothing new exists in between; the 10 s `/api/routers` pass only
-  patches the two live numbers, never re-serialises the 240-point SVGs.
+  library (§6 / P4 #18). `fetchBandwidth()` runs on load and then on a self-chaining
+  timer at the bucket period the API reports (§14) — nothing new exists in between; the
+  10 s `/api/routers` pass only patches the live numbers, never re-serialises the
+  240-point SVGs.
   - **The sparkline y-scale is `sqrt`, on a peak shared by IN and OUT.** OUT runs
     ~10–20% of IN on this fleet, so a linear shared scale flatlines it into a
     useless line; sqrt keeps OUT visibly smaller than IN while giving it readable
@@ -578,8 +584,8 @@ unambiguous — a genuine wrap inside 10 s would need > 3.4 Gbps.
 
 | Key | Default | Effect |
 |---|---|---|
-| `bandwidth_interval` | 120 | bucket length in seconds (240 points over 8 h) |
-| `bandwidth_window_hours` | 8 | history window; also the retention window |
+| `bandwidth_interval` | 360 | bucket length in seconds (240 points over 24 h) |
+| `bandwidth_window_hours` | 24 | history window; also the retention window |
 | `bandwidth_uplink` | — | `{"<ip>": "<iface>"}` manual uplink override — rarely needed now that detection is deterministic |
 
 `bandwidth_interval` / `bandwidth_window_hours` are re-read on the topology cadence
@@ -595,7 +601,7 @@ Row count is surfaced on the Maintenance page next to the other history tables.
 
 - **Bucket-boundary attribution:** a 10 s delta that straddles a bucket boundary is
   credited entirely to the new bucket (≤ 10 s of smear). `span` follows the bytes, so a
-  120 s bucket legitimately reports `span` of ~110–130 s and the bit/s figure stays
+  360 s bucket legitimately reports `span` of ~350–370 s and the bit/s figure stays
   right; only the exact placement is approximate. Don't "fix" `span` to the bucket length.
 - **A collector restart discards the in-flight bucket** (the accumulator is task-local
   memory). The bucket that was open gets re-opened post-restart with a short `span`, so
@@ -626,3 +632,225 @@ Consequences: **no AP's graph is inflated by another AP's traffic**, so no pass-
 subtraction is needed — each row already shows that AP's own internet traffic. Worth the
 operator re-checking the physical cabling though, since a hub with two paths toward
 pfSense is a switching loop waiting to matter.
+
+---
+
+## 14. Feature Pass — 2026-09-14 (24 h window + per-router client-count graph)
+
+Widens the traffic history from 8 h to **24 h** and adds a second sparkline column beside
+it: **associated clients over the same 24 h**, on the same buckets. The traffic column
+gave up half its width to make room, as requested.
+
+### Why the bucket went 120 s → 360 s
+
+The point count is what costs CPU and storage, not the time span. Holding the bucket at
+120 s would have made a 24 h window **720 points** per router per series — 3× the rows,
+3× the SVG path length, on a column that is now roughly **half as wide** (~270 px). At
+360 s the window is 24 h and the count is still **240 points**, i.e. about one point per
+pixel: same storage, same DOM weight, more coverage. Anything finer is invisible.
+
+The cost is smoothing: a 6-minute average flattens short spikes more than a 2-minute one
+did. That is the right trade for an 8 h → 24 h view, but it is the knob to turn back
+(`bandwidth_interval`) if a spike hunt ever needs the resolution.
+
+### The client count rides the existing bucket
+
+`bandwidth_history` gained a `clients` column (via the §9 try/except ALTER TABLE loop)
+rather than getting a table of its own — it wants exactly the same bucket boundaries, the
+same 24 h window, the same self-cleaning-on-write retention, and it ships in the same
+`/api/bandwidth` response. **Zero new queries, zero new SSH work**: the count is `n_cli`,
+which `poll_once()` already returns.
+
+Stored value is the **mean over the polls that landed in the bucket** (≈36 polls at a
+10 s `poll_interval`), not a single instantaneous reading — a client count is a gauge, and
+one sample every 6 minutes would alias.
+
+### **GOTCHA: bucket rollover is no longer inside the bandwidth path**
+
+It used to live under `if counters:` → `if usable:` in `run_router()`, so a bucket only
+closed when a byte delta was usable. The client series must keep advancing on an AP whose
+counters don't — no wired bridge port, a counter reset, the first poll after a reconnect —
+so the rollover was **hoisted to the top level of the successful-poll path**, and a bucket
+is now written when `acc_span > 0 **or** acc_cli_n`. Don't push it back inside.
+
+The consequence is that a row can have `span == 0` (no usable byte delta) and still carry
+a `clients` value. `/api/bandwidth` therefore gates the two series **independently**:
+`span > 0` fills `in`/`out`, `clients IS NOT NULL` fills `clients`. Either can be a gap in
+a bucket where the other has data.
+
+### Code map
+
+- **`ubus_collector.py`** — `BANDWIDTH_BUCKET_DEFAULT` 120 → **360**,
+  `BANDWIDTH_WINDOW_HOURS_DEFAULT` 8 → **24**. `clients INTEGER` on `bandwidth_history`
+  (CREATE + migration). `save_bandwidth_bucket()` takes `clients`. `run_router()` keeps
+  `acc_cli_sum` / `acc_cli_n` beside the byte accumulators and does the rollover described
+  above.
+- **`flask_app.py`** — same two defaults. `/api/bandwidth` gains a `clients` array and
+  `peak_clients` per router, and the read loop no longer `continue`s on `span <= 0`.
+- **`retention.py`** — `DEFAULT_BANDWIDTH_WINDOW_HOURS` 8 → **24** (the safety-net cutoff
+  for routers that stopped reporting; the collector still trims on every write).
+- **`templates/dashboard.html`** — grid **13 → 14 columns**: the old
+  `minmax(168px,1.5fr)` traffic column is now `minmax(96px,0.75fr)` twice, so the pair
+  occupies exactly the width traffic had alone. New `.cl-cell` / `.cl-row` / `.cl-spark` /
+  `.cl-v`. `sparkPath()` gained an `opts` argument (`height`, `linear`, `cls`) — the
+  bandwidth call is unchanged and still defaults to 17 px + sqrt.
+  - **The client graph is linear and full-height (38 px), not sqrt and 17 px.** sqrt exists
+    only because IN and OUT share one scale and bit/s spans orders of magnitude; a client
+    count is a small integer, so linear is simply correct.
+  - **Its scale is shared by the whole fleet** (`clPeak` = max `peak_clients` across all
+    routers, floored at `CL_MIN_SCALE` = 4), unlike the bandwidth graphs which scale per
+    row. Client counts all sit in the same small range, so one scale makes the rows
+    directly comparable — the whole reason to put the graph in a fleet table. Per-row
+    auto-scaling would draw a 1-client AP and a 30-client AP as identical full blocks. The
+    floor stops a near-empty fleet from doing the same. Revisit if one AP ever carries so
+    many clients that it flattens the rest.
+  - Colour is `var(--fg-muted)`, deliberately **not** an accent or a status colour: a
+    client count means nothing good or bad (§6 "colour semantics are fixed").
+  - `fetchBandwidth()` is now a **self-chaining `setTimeout`** driven by the `interval` the
+    API reports, replacing the hardcoded `setInterval(..., 120 s)`. With a 360 s bucket the
+    old timer would have re-serialised every 240-point SVG three times per bucket for
+    nothing.
+- **`templates/maintenance.html`** — the `bandwidth_history` note now says 24 h.
+
+### Migration behaviour (what the first day looks like)
+
+- Existing rows are on 120 s boundaries and have `clients` NULL. They still render:
+  `idx = (ts - t0) // interval` floors them into 360 s slots (several old rows can collapse
+  into one, last wins). Their client cells are gaps.
+- So for the first ~6 minutes after deploy the Clients column is empty, and for the first
+  24 h both graphs are partly empty on the left as the wider window fills. Self-healing;
+  no backfill was attempted.
+
+### Storage
+
+Unchanged at ~240 rows/router (~430 KB at 30 routers) — that was the point of the bucket
+change. The `clients` column adds one small integer per existing row.
+
+### Open territory
+
+- **Fleet-total client graph.** This pass is per-router (one row, one AP). A single
+  fleet-wide "total clients" sparkline in the stats strip would be a `SUM(clients) GROUP BY
+  ts` over the same table — no new collection needed.
+- **The expanded router detail still has no large version of either graph** (carried over
+  from §13) — the 24 h data is already in `bwData` and could be re-rendered bigger there.
+- **Client count is `SUM(interfaces.num_clients)`**, the same source as the `Clients`
+  number column, so a stale `interfaces` row would skew both identically.
+
+---
+
+## 15. Feature Pass — 2026-09-15 (2.4G/5G split on the client graph)
+
+Splits the per-router client sparkline (§14) from one neutral series into **two
+overlaid series** — 2.4 GHz and 5 GHz, each its own shaded area plus a line, drawn from
+the same baseline on one shared scale.
+
+### Overlaid, not stacked
+
+Stacking was built first and rejected on sight. Stacking moves the upper band's baseline,
+so "which radio is carrying more right now" — the actual question — becomes a comparison
+of two ribbons with different floors. Overlaying puts both on the same baseline, and the
+answer is just which line is higher.
+
+What stacking buys is that the envelope equals the total; overlaying gives that up. The
+total is still on the row twice (the number beside the graph, and the `Clients` column),
+so the graph spends its pixels on the comparison instead.
+
+**Three things make the overlap readable, and all three matter:**
+
+1. **Draw order: every fill first, then every line.** A line is never painted over by the
+   other series' fill, so both stay traceable through a crossing. This is why
+   `sparkOverlay()` accumulates `areas` and `lines` into separate strings and concatenates
+   them at the end rather than emitting each series as a unit.
+2. **`fill-opacity: 0.2`.** Measured against 0.28 and 0.3 on live data: heavier fills turn
+   the overlap into one flat teal mass. At 0.2 the crossing still reads as a tint between
+   the two hues.
+3. **Opaque 1.25 px strokes.** The fills are a hint; the lines carry the identity.
+
+`mix-blend-mode: screen` was tried and rejected — brighter, but it merges the hues further
+than plain alpha does, and it puts compositing work on every row (§6, Atom CPU).
+
+### The band split rides the existing bucket
+
+Same reasoning as §14: `bandwidth_history` gained `clients_24` / `clients_5` (via the §9
+try/except ALTER TABLE loop) rather than a new table. Same bucket boundaries, same 24 h
+window, same self-cleaning-on-write retention, same `/api/bandwidth` response. **Zero new
+queries, zero new SSH work** — `poll_once()` already walks every interface and already has
+`info['frequency']`, so the split is two counters in a loop that already runs.
+
+Band boundaries match the SQL convention used everywhere else in the app
+(`frequency < 3000` = 2.4G, `>= 5000` = 5G). An interface in neither band counts toward
+the total only, which is why the split is stored as two independent values rather than
+`total − clients_24`: that subtraction would silently attribute a 6 GHz radio's clients to
+5 GHz. Both are the **mean over the polls in the bucket**, on the same divisor as
+`clients`.
+
+### GOTCHA: `peak_clients` is the peak of what is DRAWN, not the peak total
+
+The series are overlaid, so the y-scale wants the larger of the two bands — scaling to a
+total that nothing draws would waste half the height. `/api/bandwidth` therefore sets
+`peak_clients` to `max(clients_24, clients_5)` per bucket, falling back to `clients` on
+buckets that have no split (those are drawn as a bare total line, so they do need to fit).
+The real peak total is a separate `peak_total`, used only by the tooltip. Don't collapse
+the two back together.
+
+### The bands and the migration line are drawn from different series
+
+Deliberate, and it is what makes the migration graceful:
+
+- **The two shaded series** come from `clients_24`/`clients_5`, and gap where either is NULL.
+- **A neutral grey line** comes from `clients`, drawn **only** on buckets where the split is
+  NULL — rows written before the per-band columns existed.
+
+So a migration-era bucket renders as a bare total line instead of vanishing, and because
+the fallback is drawn only where the bands are absent, the graph is never three series at
+the same x.
+
+### Code map
+
+- **`ubus_collector.py`** — `clients_24`/`clients_5` on `bandwidth_history` (CREATE +
+  migration). `poll_once()` returns the two counts alongside `total_clients`;
+  `run_router()` keeps `acc_cli24_sum`/`acc_cli5_sum` beside `acc_cli_sum` on the shared
+  `acc_cli_n` divisor. `save_bandwidth_bucket()` takes both.
+- **`flask_app.py`** — `/api/bandwidth` returns `clients_24`/`clients_5` arrays, the
+  redefined `peak_clients` and the new `peak_total`. The band split gaps independently of
+  the total, which already gapped independently of the bandwidth series (§14) — three
+  independent gate conditions in one read loop.
+- **`templates/dashboard.html`**
+  - `runsOf(n, ok)` — shared run-splitter, so each run of consecutive buckets becomes one
+    path and the buckets between stay gaps.
+  - `sparkOverlay(series, max, opts)` — the client renderer. Each entry is
+    `{points, area, line}`; `area` is omitted for a line-only series (the migration total).
+    Linear scale, shared fleet scale — unchanged from §14.
+  - `sparkPath()` lost the `opts` argument §14 gave it. Bandwidth was its only caller again
+    once the client graph got its own renderer, so `height`/`cls`/`linear` were all dead;
+    it is back to the fixed 17 px sqrt shape.
+  - **Colours are `var(--accent)` (2.4G) and `var(--accent-2)` (5G)** — the exact pair the
+    `.b24`/`.b5` count columns further along the same row already use, so graph and numbers
+    read as one thing. Applied via CSS classes (`.cl-a24`/`.cl-l24`/`.cl-a5`/`.cl-l5`),
+    **not** a `fill=` attribute: `var()` is only valid in a declaration, so
+    `fill="var(--accent)"` would silently render black.
+  - The column header carries the text key (`■2.4 ■5`) — §6's "never colour alone", paid
+    once per table instead of once per row. It dropped its `24h` suffix to make room; the
+    Traffic header immediately left of it states the window for both.
+
+### Migration behaviour
+
+Rows written before this pass have the total but no split, so for the first ~6 minutes
+after deploy every router shows a bare grey line, and for up to 24 h the left of each graph
+does. Self-healing; no backfill, same as §14.
+
+### Storage
+
+Two small integers per existing row. Row count unchanged.
+
+### Open territory
+
+- **No 6 GHz band.** An interface at 5925–7125 MHz falls in `>= 5000` and lands in the 5G
+  series. Correct for this fleet (no 6E APs); if one is ever added, this wants a third
+  series and the `>= 5000` convention wants revisiting **app-wide**, not just here.
+- **The overlap has no explicit "both" colour.** Two series is the readable limit for this
+  technique at 38 px; a third would need a different form (small multiples, or back to
+  stacking).
+- **The fleet-total client graph** (§14 open territory) is unaffected by this pass.
+- **The expanded router detail still has no large version of either graph** — carried over
+  from §13/§14.

@@ -48,11 +48,14 @@ PFSENSE_VOUCHER_INTERVAL_DEFAULT = 30
 # that changes rarely, so this polls much less often than voucher sessions.
 PFSENSE_TRUSTED_INTERVAL_DEFAULT = 300
 
-# ---- Uplink bandwidth sampling ----
-# Byte counters are read every poll and accumulated in memory; one row per
-# router lands in bandwidth_history each bucket. 120s x 8h = 240 points.
-BANDWIDTH_BUCKET_DEFAULT = 120          # config['bandwidth_interval']
-BANDWIDTH_WINDOW_HOURS_DEFAULT = 8      # config['bandwidth_window_hours']
+# ---- Uplink bandwidth / client-count sampling ----
+# Byte counters and the associated-client count are read every poll and
+# accumulated in memory; one row per router lands in bandwidth_history each
+# bucket. 360s x 24h = 240 points — the same row count and the same SVG size
+# as the original 120s x 8h, because the column is now half as wide and finer
+# resolution than one point per pixel would only cost CPU.
+BANDWIDTH_BUCKET_DEFAULT = 360          # config['bandwidth_interval']
+BANDWIDTH_WINDOW_HOURS_DEFAULT = 24     # config['bandwidth_window_hours']
 # How often the bridge/carrier/wireless topology probe is re-run to
 # re-pick the uplink port. Cabling changes rarely; this is cheap insurance.
 TOPO_REFRESH_SECONDS = 300
@@ -192,10 +195,11 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_sysmetrics_router_ts ON system_metrics(router_ip, ts)")
 
-    # ---- Uplink bandwidth history ----
+    # ---- Uplink bandwidth + client-count history ----
     # One row per router per bucket, holding the bytes that crossed the AP's
-    # uplink port group during that bucket. `ts` is a unix INTEGER (bucket
-    # start, wall-clock aligned so every router shares bucket boundaries) —
+    # uplink port group during that bucket, and the mean number of associated
+    # clients over it. `ts` is a unix INTEGER (bucket start, wall-clock
+    # aligned so every router shares bucket boundaries) —
     # deliberately NOT the ISO string the other *_history tables use, because
     # /api/bandwidth buckets it arithmetically. retention.py handles it
     # separately for exactly that reason.
@@ -209,7 +213,10 @@ def init_db():
             router_ip TEXT NOT NULL,
             rx_bytes INTEGER NOT NULL,
             tx_bytes INTEGER NOT NULL,
-            span INTEGER NOT NULL
+            span INTEGER NOT NULL,
+            clients INTEGER,
+            clients_24 INTEGER,
+            clients_5 INTEGER
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bw_router_ts ON bandwidth_history(router_ip, ts)")
@@ -289,13 +296,23 @@ def init_db():
         # last_activity added after voucher_sessions shipped without it.
         "ALTER TABLE voucher_sessions ADD COLUMN last_activity INTEGER",
         # Live uplink throughput, refreshed every poll so /api/routers (10s)
-        # can show a current number next to the 8h sparklines.
+        # can show a current number next to the 24h sparklines.
         "ALTER TABLE routers ADD COLUMN bw_in_bps INTEGER",
         "ALTER TABLE routers ADD COLUMN bw_out_bps INTEGER",
         "ALTER TABLE routers ADD COLUMN bw_uplink TEXT",
         "ALTER TABLE routers ADD COLUMN bw_updated INTEGER",
         # How the uplink was chosen: gateway | override | traffic | none.
         "ALTER TABLE routers ADD COLUMN bw_uplink_src TEXT",
+        # Mean associated-client count per bucket, added after
+        # bandwidth_history shipped. NULL on pre-migration rows, which the
+        # dashboard renders as a gap; it fills in within one window.
+        "ALTER TABLE bandwidth_history ADD COLUMN clients INTEGER",
+        # Per-band split of that mean, so the client sparkline can show the
+        # 2.4G/5G distribution as two overlaid series. NULL on rows written
+        # before this column existed; the dashboard draws those buckets as a
+        # bare total line, and they fill in within one window.
+        "ALTER TABLE bandwidth_history ADD COLUMN clients_24 INTEGER",
+        "ALTER TABLE bandwidth_history ADD COLUMN clients_5 INTEGER",
     ]:
         try:
             cur.execute(_ddl)
@@ -777,20 +794,33 @@ def save_live_bandwidth(router_ip: str, uplink: Optional[str], src: str,
 
 
 def save_bandwidth_bucket(router_ip: str, ts: int, rx: int, tx: int,
-                          span: int, window_hours: int):
+                          span: int, clients: Optional[int],
+                          clients_24: Optional[int], clients_5: Optional[int],
+                          window_hours: int):
     """Append one closed bucket and drop anything outside the window.
 
     Self-cleaning like voucher_sessions (§12): the table is pinned to the
     display window on every write, so it never waits on the daily retention
     pass and never grows past ~(window / bucket) rows per router.
+
+    `span` is 0 when no usable byte delta landed in the bucket (no uplink
+    picked, or a counter reset). The row is still written for the sake of
+    `clients`, and the API treats span<=0 as "no bandwidth sample" — the two
+    series are independent gaps.
+
+    `clients_24` / `clients_5` are the same mean split by band, drawn as two
+    overlaid series. They are rounded independently of `clients`, so their
+    sum can differ from it by 1 — harmless, since the two are never summed
+    for display.
     """
     conn = sqlite3.connect(DB_PATH)
     try:
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO bandwidth_history (ts, router_ip, rx_bytes, tx_bytes, span) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (ts, router_ip, rx, tx, span),
+            "INSERT INTO bandwidth_history "
+            "(ts, router_ip, rx_bytes, tx_bytes, span, clients, clients_24, clients_5) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (ts, router_ip, rx, tx, span, clients, clients_24, clients_5),
         )
         cur.execute(
             "DELETE FROM bandwidth_history WHERE router_ip=? AND ts < ?",
@@ -978,12 +1008,23 @@ async def poll_once(conn: asyncssh.SSHClientConnection, router_ip: str,
 
     interfaces = []
     total_clients = 0
+    # Per-band split, for the client sparkline. Band boundaries match
+    # the SQL convention used everywhere else (<3000 = 2.4G, >=5000 = 5G); an
+    # interface in neither band counts toward the total only.
+    clients_24 = clients_5 = 0
     for dev in devices:
         info = await ubus_call(conn, "iwinfo", "info", {"device": dev}) or {}
         assoc = await ubus_call(conn, "iwinfo", "assoclist", {"device": dev}) or {}
         clients = [parse_client(c) for c in assoc.get("results", [])]
         interfaces.append({"device": dev, "info": info, "clients": clients})
         total_clients += len(clients)
+        freq = info.get("frequency")
+        if not freq:
+            pass  # interface down / frequency unknown: total only
+        elif freq < 3000:
+            clients_24 += len(clients)
+        elif freq >= 5000:
+            clients_5 += len(clients)
 
     system_info = await fetch_system_info(conn) if fetch_system else None
     wifi_config = await fetch_wifi_config(conn)
@@ -1033,7 +1074,7 @@ async def poll_once(conn: asyncssh.SSHClientConnection, router_ip: str,
         pass
 
     return (hostname, interfaces, system_info, len(devices), total_clients,
-            counters, topology)
+            clients_24, clients_5, counters, topology)
 
 
 async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
@@ -1050,7 +1091,7 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
     # Force a history write on the very first successful poll.
     last_history_mono = -float("inf")
 
-    # ---- uplink bandwidth accumulator (task-local: one task per router) ----
+    # ---- bandwidth + client-count accumulator (task-local: one per router) ----
     bw_bucket = max(30, int(config.get("bandwidth_interval",
                                        BANDWIDTH_BUCKET_DEFAULT)))
     bw_window = max(1, int(config.get("bandwidth_window_hours",
@@ -1063,6 +1104,11 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
     bucket_start: Optional[int] = None
     acc_rx = acc_tx = 0
     acc_span = 0.0
+    # Client count is a gauge, so the bucket carries its mean over the polls
+    # that landed in it rather than a single instantaneous reading. The two
+    # per-band sums ride the same divisor (acc_cli_n).
+    acc_cli_sum = acc_cli_n = 0
+    acc_cli24_sum = acc_cli5_sum = 0
     # Force a topology probe on the first poll after every (re)connect.
     last_topo_mono = -float("inf")
 
@@ -1098,7 +1144,7 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
             now_mono = time.monotonic()
             write_history = (now_mono - last_history_mono) >= history_interval
             refresh_topo = (now_mono - last_topo_mono) >= TOPO_REFRESH_SECONDS
-            (host, interfaces, system_info, n_dev, n_cli,
+            (host, interfaces, system_info, n_dev, n_cli, n_cli24, n_cli5,
              counters, topology) = await poll_once(
                 conn, router_ip,
                 fetch_system=write_history, fetch_topology=refresh_topo,
@@ -1137,6 +1183,35 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
                     )
                 uplink_group, uplink_ifaces, uplink_src = group, ifaces, src
 
+            # Buckets are wall-clock aligned so every router shares
+            # boundaries and /api/bandwidth can index them directly.
+            # Rollover runs on every successful poll, not only when a byte
+            # delta was usable: the client-count series has to keep advancing
+            # on an AP whose uplink counters don't (no wired bridge port,
+            # counter reset, first poll after a reconnect).
+            bucket = int(time.time()) // bw_bucket * bw_bucket
+            if bucket_start is None:
+                bucket_start = bucket
+            elif bucket != bucket_start:
+                if acc_span > 0 or acc_cli_n:
+                    save_bandwidth_bucket(
+                        router_ip, bucket_start, acc_rx, acc_tx,
+                        int(round(acc_span)),
+                        round(acc_cli_sum / acc_cli_n) if acc_cli_n else None,
+                        round(acc_cli24_sum / acc_cli_n) if acc_cli_n else None,
+                        round(acc_cli5_sum / acc_cli_n) if acc_cli_n else None,
+                        bw_window,
+                    )
+                bucket_start = bucket
+                acc_rx = acc_tx = 0
+                acc_span = 0.0
+                acc_cli_sum = acc_cli_n = 0
+                acc_cli24_sum = acc_cli5_sum = 0
+            acc_cli_sum += n_cli
+            acc_cli24_sum += n_cli24
+            acc_cli5_sum += n_cli5
+            acc_cli_n += 1
+
             if counters:
                 if prev_counters is not None and uplink_ifaces:
                     elapsed = now_mono - prev_mono
@@ -1159,20 +1234,8 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
                             router_ip, uplink_group, uplink_src,
                             int(d_rx * 8 / elapsed), int(d_tx * 8 / elapsed),
                         )
-                        # Buckets are wall-clock aligned so every router shares
-                        # boundaries and /api/bandwidth can index them directly.
-                        bucket = int(time.time()) // bw_bucket * bw_bucket
-                        if bucket_start is None:
-                            bucket_start = bucket
-                        elif bucket != bucket_start:
-                            if acc_span > 0:
-                                save_bandwidth_bucket(
-                                    router_ip, bucket_start, acc_rx, acc_tx,
-                                    int(round(acc_span)), bw_window,
-                                )
-                            bucket_start = bucket
-                            acc_rx = acc_tx = 0
-                            acc_span = 0.0
+                        # Credited to whichever bucket was open when the
+                        # sample was taken (rolled over just above).
                         acc_rx += d_rx
                         acc_tx += d_tx
                         acc_span += elapsed

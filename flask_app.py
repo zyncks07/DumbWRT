@@ -428,19 +428,25 @@ def api_reachability():
         'routers': out,
     })
 
-BANDWIDTH_BUCKET_DEFAULT = 120
-BANDWIDTH_WINDOW_HOURS_DEFAULT = 8
+BANDWIDTH_BUCKET_DEFAULT = 360
+BANDWIDTH_WINDOW_HOURS_DEFAULT = 24
 
 
 @app.route('/api/bandwidth')
 @login_required
 def api_bandwidth():
-    """Per-router uplink throughput for the last `bandwidth_window_hours`.
+    """Per-router uplink throughput and client count for the last
+    `bandwidth_window_hours`.
 
-    Returns two fixed-length arrays of bit/s per router, indexed by bucket
-    so the client can render a sparkline without any timestamp maths.
-    `null` means no sample for that bucket (router offline) and renders as
-    a gap rather than a zero.
+    Returns five fixed-length arrays per router (`in`/`out` in bit/s,
+    `clients` as a count plus its `clients_24`/`clients_5` band split),
+    indexed by bucket so the client can render a sparkline without any
+    timestamp maths. `null` means no sample for that bucket (router offline)
+    and renders as a gap rather than a zero. The bandwidth and client series
+    gap independently: a bucket with no usable byte delta still carries its
+    client count. The band split gaps independently again — rows written
+    before those columns existed have the total but no split, and the
+    dashboard draws the bare total for exactly those buckets.
     """
     config = load_config()
     interval = max(30, int(config.get('bandwidth_interval',
@@ -465,29 +471,56 @@ def api_bandwidth():
             'src': row['bw_uplink_src'],
             'in': [None] * buckets,
             'out': [None] * buckets,
+            'clients': [None] * buckets,
+            'clients_24': [None] * buckets,
+            'clients_5': [None] * buckets,
             'peak': 0,
+            # y-scale for the client graph: the peak of what the dashboard
+            # actually draws. The two bands are overlaid, not stacked, so
+            # that is the larger of the two — plus the total on buckets
+            # predating the split columns, which are drawn as a bare total
+            # line. Scaling to a total that nothing draws would waste half
+            # the height.
+            'peak_clients': 0,
+            # The real peak total, for the tooltip only.
+            'peak_total': 0,
         }
         for row in cur.fetchall()
     }
 
     cur.execute(
-        "SELECT router_ip, ts, rx_bytes, tx_bytes, span FROM bandwidth_history "
-        "WHERE ts >= ? ORDER BY ts ASC",
+        "SELECT router_ip, ts, rx_bytes, tx_bytes, span, clients, "
+        "clients_24, clients_5 "
+        "FROM bandwidth_history WHERE ts >= ? ORDER BY ts ASC",
         (t0,),
     )
     for row in cur.fetchall():
         entry = out.get(row['router_ip'])
-        span = row['span'] or 0
-        if entry is None or span <= 0:
+        if entry is None:
             continue
         idx = (row['ts'] - t0) // interval
         if not (0 <= idx < buckets):
             continue
-        in_bps = int(row['rx_bytes'] * 8 / span)
-        out_bps = int(row['tx_bytes'] * 8 / span)
-        entry['in'][idx] = in_bps
-        entry['out'][idx] = out_bps
-        entry['peak'] = max(entry['peak'], in_bps, out_bps)
+        span = row['span'] or 0
+        if span > 0:
+            in_bps = int(row['rx_bytes'] * 8 / span)
+            out_bps = int(row['tx_bytes'] * 8 / span)
+            entry['in'][idx] = in_bps
+            entry['out'][idx] = out_bps
+            entry['peak'] = max(entry['peak'], in_bps, out_bps)
+        # NULL on rows written before the `clients` column existed, and on
+        # buckets where no poll succeeded — both render as a gap.
+        if row['clients'] is not None:
+            entry['clients'][idx] = row['clients']
+            entry['peak_total'] = max(entry['peak_total'], row['clients'])
+        c24, c5 = row['clients_24'], row['clients_5']
+        if c24 is not None and c5 is not None:
+            entry['clients_24'][idx] = c24
+            entry['clients_5'][idx] = c5
+            entry['peak_clients'] = max(entry['peak_clients'], c24, c5)
+        elif row['clients'] is not None:
+            # No split for this bucket, so the total is what gets drawn.
+            entry['peak_clients'] = max(entry['peak_clients'], row['clients'])
     conn.close()
 
     return jsonify({

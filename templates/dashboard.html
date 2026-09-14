@@ -294,9 +294,10 @@
         }
         .router-th, .router-tr {
             display: grid;
-            /* Spare width goes to the traffic sparklines rather than the
-               hostname column, which only ever holds a short name. */
-            grid-template-columns: 28px minmax(120px, 0.5fr) minmax(168px, 1.5fr) 112px 112px 110px 60px 60px 60px 64px 90px 110px 28px;
+            /* Spare width goes to the two sparkline columns rather than the
+               hostname column, which only ever holds a short name. Traffic
+               gave up half its width to the client-count graph. */
+            grid-template-columns: 28px minmax(120px, 0.5fr) minmax(96px, 0.75fr) minmax(96px, 0.75fr) 112px 112px 110px 60px 60px 60px 64px 90px 110px 28px;
             align-items: center;
             gap: 10px;
             padding: 0 14px;
@@ -319,7 +320,7 @@
             font-weight: 600;
         }
         .rm-val { font-weight: 600; }
-        /* ---- Uplink bandwidth sparklines (8h) ---- */
+        /* ---- Uplink bandwidth sparklines (24h) ---- */
         .bw-cell {
             display: flex;
             flex-direction: column;
@@ -354,6 +355,91 @@
             font-weight: 600;
             font-variant-numeric: tabular-nums;
             color: var(--fg-muted);
+        }
+        /* ---- Associated-client count sparklines (24h) ---- */
+        /* Two independent series overlaid, taking the row's full height
+           instead of the two 19px bands the bandwidth cell splits into.
+           They reuse the exact colours of the .b24/.b5 count columns
+           further along the same row, so the graph and the numbers read as
+           one thing; the column header carries the text key (§6: never
+           colour alone). Neither is a status colour — a client count means
+           nothing good or bad. */
+        .cl-cell {
+            display: flex;
+            align-items: center;
+            min-width: 0;
+        }
+        .cl-row {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            height: 40px;
+            width: 100%;
+            min-width: 0;
+            color: var(--fg-muted);
+        }
+        .cl-row i { font-size: 8px; width: 8px; flex: none; }
+        .cl-spark {
+            flex: 1 1 auto;
+            min-width: 0;
+            height: 38px;
+            display: block;
+            background: var(--card-bg-3);
+            border-radius: 2px;
+        }
+        /* The two series overlap rather than stack, so the fills are kept
+           light: at 0.2 a crossing composites to a tint that still reads as
+           between the two hues, where a heavier fill turns the whole overlap
+           into one flat teal mass. Tried and rejected: mix-blend-mode:screen,
+           which is brighter but merges the hues further — and costs
+           compositing work on every row (§6, Atom CPU).
+           Filled via CSS rather than a fill= attribute so they follow the
+           theme — var() is not valid in a presentation attribute, only in a
+           declaration. */
+        .cl-a24 { fill: var(--accent);   fill-opacity: 0.20; }
+        .cl-a5  { fill: var(--accent-2); fill-opacity: 0.20; }
+        /* The strokes are what keep each series readable through an
+           overlap: full opacity, and drawn above every fill, so each line
+           can always be traced across the crossings. */
+        .cl-l24, .cl-l5, .cl-edge {
+            fill: none;
+            stroke-width: 1.25;
+            stroke-linejoin: round;
+            vector-effect: non-scaling-stroke;
+        }
+        .cl-l24 { stroke: var(--accent); }
+        .cl-l5  { stroke: var(--accent-2); }
+        /* Migration-only: the total, for buckets whose split predates the
+           per-band columns. Neutral, and never drawn where the two bands
+           are, so the graph is only ever two series at any given x. */
+        .cl-edge { stroke: var(--fg-muted); stroke-opacity: 0.8; }
+        /* Column-header key for the two band colours. */
+        .cl-key {
+            white-space: nowrap;
+            font-weight: 400;
+            font-size: 9px;
+            text-transform: none;
+            letter-spacing: 0;
+            opacity: 0.85;
+        }
+        .cl-key b {
+            display: inline-block;
+            width: 7px;
+            height: 7px;
+            border-radius: 1px;
+            margin: 0 2px 0 4px;
+            vertical-align: baseline;
+        }
+        .cl-key .k24 { background: var(--accent); }
+        .cl-key .k5  { background: var(--accent-2); }
+        .cl-v {
+            flex: none;
+            width: 24px;
+            text-align: right;
+            font-size: 11px;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            color: var(--fg);
         }
         .reach-strip {
             height: 14px;
@@ -581,10 +667,24 @@
             return `<div class="reach-strip">${parts}</div>`;
         }
 
-        /* ---- Uplink bandwidth sparklines ---- */
+        /* ---- Uplink bandwidth + client-count sparklines ---- */
         let bwData = {};
         let bwBuckets = 240;
-        let bwWindowHours = 8;
+        let bwWindowHours = 24;
+        let bwIntervalSec = 360;
+        // Client graphs share ONE scale across the whole fleet, unlike the
+        // bandwidth graphs (which scale per row, because bit/s spans orders of
+        // magnitude between APs). Client counts all sit in the same small
+        // range, so a shared scale makes the rows directly comparable — which
+        // is the whole reason to put the graph in a fleet table. The floor
+        // stops a one-client fleet from drawing full-height blocks.
+        //
+        // `peak_clients` is the peak of what is actually drawn (the larger of
+        // the two bands, or the total on migration-era buckets that have no
+        // split), NOT the peak total — the series are overlaid, so scaling to
+        // a total nothing draws would waste half the height.
+        const CL_MIN_SCALE = 4;
+        let clPeak = CL_MIN_SCALE;
 
         // Bare magnitude, for the tooltip where "bps" is spelled out once.
         function fmtBps(bps) {
@@ -602,14 +702,17 @@
 
         // Hand-rolled SVG — no chart library (§6). One filled path per run of
         // consecutive samples, so an offline gap renders as a gap.
+        //
+        // The y-scale is square root, not linear: IN and OUT share one peak
+        // so they stay comparable to each other, but OUT runs ~10-20% of IN
+        // on these APs and a linear shared scale flatlines it into a useless
+        // line. sqrt keeps the ordering (OUT still visibly smaller) while
+        // giving it shape; exact magnitudes are the job of the number beside
+        // the graph. sparkOverlay below is the client-count counterpart, and
+        // is linear because a small integer gauge needs no such compression.
         function sparkPath(points, max) {
             const n = points.length;
             const H = 17;
-            // Square-root scale on a peak shared by IN and OUT. Linear would
-            // be honest but useless here: OUT runs ~10-20% of IN on these APs,
-            // so it would flatline against the shared scale. sqrt keeps the
-            // ordering (OUT still visibly smaller) while giving it shape. The
-            // exact magnitudes are the job of the number beside the graph.
             const top = max > 0 ? Math.sqrt(max) : 0;
             const scale = top > 0 ? (H - 1) / top : 0;
             const y = v => +(H - 0.5 - Math.sqrt(v) * scale).toFixed(2);
@@ -645,6 +748,71 @@
                          fill="currentColor" stroke="none">${body}</svg>`;
         }
 
+        // Runs of consecutive bucket indices passing `ok`, so each run can
+        // become one path and the buckets between them stay gaps.
+        function runsOf(n, ok) {
+            const out = [];
+            let run = [];
+            for (let i = 0; i < n; i++) {
+                if (ok(i)) run.push(i);
+                else if (run.length) { out.push(run); run = []; }
+            }
+            if (run.length) out.push(run);
+            return out;
+        }
+
+        // Overlay variant of sparkPath for the client graph: each series is
+        // its own area-from-baseline plus a line, drawn on one shared scale
+        // so 2.4G and 5G can be compared directly. Deliberately NOT stacked —
+        // stacking moves the upper band's baseline, which is exactly what
+        // makes "which radio is carrying more right now" hard to read.
+        //
+        // The two survive overlapping because of the draw order: every fill
+        // first, then every line. The fills are translucent enough that a
+        // crossing composites to a blend of the two hues, and the lines above
+        // them are opaque, so each series stays traceable through it.
+        //
+        // Linear on the shared fleet scale — see sparkPath's notes on why the
+        // bandwidth graph is the one that needs sqrt.
+        //
+        // Each entry is {points, area, line}; `area` may be omitted for a
+        // line-only series (the migration-era total, which has no split to
+        // shade and never coexists with the bands at the same x).
+        function sparkOverlay(series, max, opts) {
+            const n = (opts && opts.n) || 0;
+            const H = (opts && opts.height) || 38;
+            const cls = (opts && opts.cls) || 'cl-spark';
+            const scale = max > 0 ? (H - 1) / max : 0;
+            const y = v => +(H - 0.5 - v * scale).toFixed(2);
+
+            let areas = '', lines = '';
+            series.forEach(sr => {
+                const pts = sr.points || [];
+                runsOf(n, i => pts[i] != null).forEach(run => {
+                    // A lone sample gets a 1-unit tick / bar; a one-point
+                    // path would draw nothing.
+                    if (run.length === 1) {
+                        const i = run[0], yv = y(pts[i]);
+                        if (sr.area) {
+                            const h = +(H - yv).toFixed(2);
+                            if (h > 0.01) areas += `<rect class="${sr.area}" x="${i}" y="${yv}" width="1" height="${h}"/>`;
+                        }
+                        lines += `<path class="${sr.line}" d="M${i} ${yv}L${i + 1} ${yv}"/>`;
+                        return;
+                    }
+                    const d = run.map((i, k) => `${k ? 'L' : 'M'}${i} ${y(pts[i])}`).join('');
+                    if (sr.area) {
+                        // Area closed down to the baseline; the line is a
+                        // separate path so the closing edges aren't stroked.
+                        areas += `<path class="${sr.area}" d="${d}L${run[run.length - 1]} ${H}L${run[0]} ${H}Z"/>`;
+                    }
+                    lines += `<path class="${sr.line}" d="${d}"/>`;
+                });
+            });
+
+            return `<svg class="${cls}" viewBox="0 0 ${n} ${H}" preserveAspectRatio="none">${areas}${lines}</svg>`;
+        }
+
         function bwRows(ip, router) {
             const d = bwData[ip];
             const empty = new Array(d ? d.in.length : bwBuckets).fill(null);
@@ -660,6 +828,50 @@
             return `
                 <div class="bw-row in"><i class="fas fa-arrow-down"></i>${sparkPath(inPts, peak)}<span class="bw-v">${fmtBpsLabel(liveIn)}</span></div>
                 <div class="bw-row out"><i class="fas fa-arrow-up"></i>${sparkPath(outPts, peak)}<span class="bw-v">${fmtBpsLabel(liveOut)}</span></div>`;
+        }
+
+        // Associated clients over the same window and the same buckets as
+        // the traffic graph, on the shared fleet scale: 2.4G and 5G as two
+        // overlaid series so the two radios can be compared directly.
+        function clRow(ip, router) {
+            const d = bwData[ip];
+            const empty = new Array(bwBuckets).fill(null);
+            const total = (d && d.clients) || empty;
+            const c24 = (d && d.clients_24) || empty;
+            const c5 = (d && d.clients_5) || empty;
+            const n = total.length;
+            // Buckets predating the per-band columns know the total but not
+            // the split. Drawing the total there — and only there — keeps
+            // them from vanishing without ever putting a third series on top
+            // of the two bands.
+            const preSplit = total.map(
+                (v, i) => (c24[i] == null || c5[i] == null) ? v : null);
+            const live = router ? (router.total_clients || 0) : 0;
+            return `<div class="cl-row"><i class="fas fa-users"></i>`
+                 + sparkOverlay([
+                       {points: c24, area: 'cl-a24', line: 'cl-l24'},
+                       {points: c5,  area: 'cl-a5',  line: 'cl-l5'},
+                       {points: preSplit, line: 'cl-edge'},
+                   ], clPeak, {n: n, height: 38, cls: 'cl-spark'})
+                 + `<span class="cl-v">${live}</span></div>`;
+        }
+
+        function clTitle(ip, router) {
+            const d = bwData[ip];
+            return `associated clients · last ${bwWindowHours}h`
+                 + ` · 2.4G and 5G overlaid, not stacked`
+                 + ` · peak total ${d ? (d.peak_total || 0) : 0}`
+                 + ` · now ${router ? (router.total_clients || 0) : 0}`
+                 + ` (2.4G ${router ? (router.clients_24 || 0) : 0}`
+                 + ` / 5G ${router ? (router.clients_5 || 0) : 0})`
+                 + ` · scale 0-${clPeak} (shared by every router)`;
+        }
+
+        function paintCl(ip, router) {
+            const cell = document.getElementById(`cl-${ip.replace(/\./g, '_')}`);
+            if (!cell) return;
+            cell.innerHTML = clRow(ip, router);
+            cell.title = clTitle(ip, router);
         }
 
         // How the collector picked the uplink port, spelled out so a
@@ -707,7 +919,13 @@
                 bwData = d.routers || {};
                 bwBuckets = d.buckets || bwBuckets;
                 bwWindowHours = d.window_hours || bwWindowHours;
-                Object.keys(bwData).forEach(ip => paintBw(ip, currentRouterData[ip]));
+                bwIntervalSec = d.interval || bwIntervalSec;
+                clPeak = Object.values(bwData).reduce(
+                    (m, r) => Math.max(m, r.peak_clients || 0), CL_MIN_SCALE);
+                Object.keys(bwData).forEach(ip => {
+                    paintBw(ip, currentRouterData[ip]);
+                    paintCl(ip, currentRouterData[ip]);
+                });
             } catch (e) {
                 console.error('bandwidth fetch failed', e);
             }
@@ -928,6 +1146,7 @@
                     <div><span class="dot"></span></div>
                     <div class="hostname">${r.hostname || r.ip}</div>
                     <div class="bw-cell" id="bw-${safeIP}" title="${bwTitle(r.ip, r)}">${bwRows(r.ip, r)}</div>
+                    <div class="cl-cell" id="cl-${safeIP}" title="${clTitle(r.ip, r)}">${clRow(r.ip, r)}</div>
                     <div class="rm24">${fmtRadioMini(r.ch_24, r.noise_24, r.bitrate_24)}</div>
                     <div class="rm5">${fmtRadioMini(r.ch_5, r.noise_5, r.bitrate_5)}</div>
                     <div class="ip" data-copy="${r.ip}" data-copy-label="IP">${r.ip}</div>
@@ -980,6 +1199,7 @@
                                 <div></div>
                                 <div>Hostname</div>
                                 <div>Traffic ${bwWindowHours}h</div>
+                                <div>Clients<span class="cl-key"><b class="k24"></b>2.4<b class="k5"></b>5</span></div>
                                 <div>2.4G Radio</div>
                                 <div>5G Radio</div>
                                 <div>IP</div>
@@ -1025,8 +1245,11 @@
                             // six times a minute.
                             setText(row, '.bw-row.in .bw-v',  fmtBpsLabel(liveBps(router, 'bw_in_bps')));
                             setText(row, '.bw-row.out .bw-v', fmtBpsLabel(liveBps(router, 'bw_out_bps')));
+                            setText(row, '.cl-v', router.total_clients || 0);
                             const bwCell = row.querySelector('.bw-cell');
                             if (bwCell) bwCell.title = bwTitle(router.ip, router);
+                            const clCell = row.querySelector('.cl-cell');
+                            if (clCell) clCell.title = clTitle(router.ip, router);
                         });
                     }
 
@@ -1209,9 +1432,16 @@
         }, 10000);
         // Reachability changes slowly — refresh every 5 minutes.
         setInterval(fetchReachability, 5 * 60 * 1000);
-        // Bandwidth history gains one point per bucket (default 120s), so
-        // there is nothing new to fetch more often than that.
-        setInterval(fetchBandwidth, 2 * 60 * 1000);
+        // The history gains one point per bucket (360s by default), so there
+        // is nothing new to fetch more often than that. Chained rather than
+        // setInterval so the cadence follows whatever bucket length the API
+        // reports — changing `bandwidth_interval` can't leave the browser
+        // re-serialising 240-point SVGs several times per bucket.
+        (function scheduleBandwidth() {
+            setTimeout(() => {
+                fetchBandwidth().finally(scheduleBandwidth);
+            }, Math.max(30, bwIntervalSec) * 1000);
+        })();
     </script>
     <script src="/static/copy-utils.js"></script>
     <script src="/static/theme.js"></script>
