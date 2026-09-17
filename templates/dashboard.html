@@ -227,6 +227,71 @@
             font-size: 9px;
             font-variant-numeric: tabular-nums;
         }
+        /* ---- hover readout ----
+           Cursor and tooltip are siblings of the <svg>, not children of it:
+           renderSsidGraph() replaces the svg wholesale on every refresh, and
+           these have to survive that. Both are pointer-events:none so the
+           mousemove target stays the plot itself. */
+        .ssid-plot { cursor: crosshair; }
+        .ssid-cursor, .ssid-tip { display: none; }
+        .ssid-plot.hov .ssid-cursor, .ssid-plot.hov .ssid-tip { display: block; }
+        .ssid-cursor {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 0;
+            border-left: 1px solid var(--fg-muted);
+            opacity: 0.6;
+            pointer-events: none;
+        }
+        .ssid-tip {
+            position: absolute;
+            top: 6px;
+            z-index: 3;
+            background: var(--card-bg);
+            border: 1px solid var(--border-b);
+            border-radius: 6px;
+            padding: 6px 9px;
+            font-size: 11px;
+            pointer-events: none;
+            white-space: nowrap;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+        }
+        .ssid-tip-h {
+            display: flex;
+            justify-content: space-between;
+            gap: 14px;
+            color: var(--fg-muted);
+            font-size: 9.5px;
+            margin-bottom: 4px;
+        }
+        .ssid-tip-r {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            line-height: 1.55;
+        }
+        .ssid-tip-r .nm {
+            flex: 1;
+            max-width: 170px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .ssid-tip-r b {
+            font-variant-numeric: tabular-nums;
+            min-width: 22px;
+            text-align: right;
+        }
+        .ssid-tip-t {
+            display: flex;
+            justify-content: space-between;
+            gap: 14px;
+            margin-top: 4px;
+            padding-top: 4px;
+            border-top: 1px solid var(--border-c);
+            color: var(--fg-muted);
+        }
+        .ssid-tip-t b { color: var(--fg); font-variant-numeric: tabular-nums; }
         .ssid-empty {
             position: absolute;
             inset: 0 0 0 34px;
@@ -803,6 +868,8 @@
         <div class="ssid-plot" id="ssidPlot">
             <div class="ssid-grid" id="ssidGrid"></div>
             <div class="ssid-empty">no data yet</div>
+            <div class="ssid-cursor" id="ssidCursor"></div>
+            <div class="ssid-tip" id="ssidTip"></div>
         </div>
         <div class="ssid-xaxis" id="ssidXaxis"></div>
     </div>
@@ -872,6 +939,7 @@
         let ssidOrder = [];
         let ssidSeries = {};
         let ssidBuckets = 0;
+        let ssidT0 = 0;
         let ssidIntervalSec = 120;
         let ssidWindowHours = 24;
         let ssidPeak = SSID_MIN_SCALE;
@@ -1052,6 +1120,8 @@
                 if (grid) grid.innerHTML = '';
                 if (xax) xax.innerHTML = '';
                 if (pk) pk.textContent = '';
+                plot.classList.remove('hov');
+                ssidHoverIdx = -1;
                 plot.removeAttribute('title');
                 return;
             }
@@ -1092,11 +1162,134 @@
                 pk.textContent = `peak ${ssidPeakTotal} total`
                     + ` · ${Math.round(ssidIntervalSec / 60)}-min avg`;
             }
+            // The hover tooltip is the per-bucket readout; the element title
+            // stays as the "what am I looking at" summary. Only set when the
+            // pointer is away, so the browser can't pop a native tooltip over
+            // the custom one.
             plot.title = `Associated clients per SSID, last ${ssidWindowHours}h`
                        + ` · ${Math.round(ssidIntervalSec / 60)}-minute average`
                        + ` · ${ssidBuckets} points`
                        + ` · scale 0–${max} (busiest single SSID)`
                        + ` · fleet peak ${ssidPeakTotal}`;
+
+            // A refresh landed under a stationary pointer: the bucket grid
+            // shifted by one, so repaint the readout in place rather than
+            // leaving the previous bucket's numbers on screen.
+            if (ssidHoverIdx >= 0) {
+                ssidRect = null;
+                paintSsidHover(Math.min(ssidHoverIdx, ssidBuckets - 1));
+            }
+        }
+
+        // ---- hover readout ----
+        // The dashboard's only mousemove handler, so it is kept cheap on
+        // purpose (§6, Atom CPU):
+        //   - events are coalesced into one requestAnimationFrame, so a fast
+        //     drag across the card does at most one update per frame;
+        //   - the update is then gated on the bucket index actually changing.
+        //     At 720 buckets over ~1830px a bucket is ~2.5px wide, so most
+        //     frames resolve to the same bucket and do no DOM work at all;
+        //   - the cursor snaps to the bucket centre rather than tracking the
+        //     pointer, which is both what makes that gate valid and what
+        //     makes it unambiguous which sample is being read.
+        // The plot rect is measured once per hover (and on resize) instead of
+        // per move — getBoundingClientRect() in a mousemove forces layout.
+        const SSID_GUTTER = 34;      // must match .ssid-plot's padding-left
+        let ssidRect = null;
+        let ssidHoverIdx = -1;
+        let ssidRaf = 0;
+        let ssidPendingX = 0;
+
+        function ssidPlotGeom() {
+            const plot = document.getElementById('ssidPlot');
+            if (!plot) return null;
+            if (!ssidRect) ssidRect = plot.getBoundingClientRect();
+            const w = ssidRect.width - SSID_GUTTER;
+            return w > 0 ? {plot: plot, w: w} : null;
+        }
+
+        // Paints cursor + tooltip for one bucket. Also called after a repaint
+        // while the pointer is still down on the card, so a refresh under the
+        // cursor updates the numbers in place.
+        function paintSsidHover(idx) {
+            const g = ssidPlotGeom();
+            if (!g || !ssidBuckets) return;
+            const names = ssidOrder.filter(n => ssidSeries[n]);
+            const cur = document.getElementById('ssidCursor');
+            const tip = document.getElementById('ssidTip');
+            if (!cur || !tip) return;
+
+            const cx = SSID_GUTTER + (idx + 0.5) * g.w / ssidBuckets;
+            cur.style.left = cx.toFixed(1) + 'px';
+
+            // Age is derived from the server's own bucket grid — the newest
+            // bucket is index buckets-1 — so the readout can't be skewed by
+            // the browser clock. Only the wall-clock label uses Date, where
+            // local formatting is the whole point.
+            const ageS = (ssidBuckets - 1 - idx) * ssidIntervalSec;
+            const h = Math.floor(ageS / 3600), m = Math.round((ageS % 3600) / 60);
+            const ago = ageS < 60 ? 'now' : (h ? `${h}h ${m}m ago` : `${m}m ago`);
+            const when = ssidT0
+                ? new Date((ssidT0 + idx * ssidIntervalSec) * 1000)
+                    .toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
+                : '';
+
+            let total = 0, any = false, rows = '';
+            names.forEach(n => {
+                const v = (ssidSeries[n] || [])[idx];
+                if (v != null) { total += v; any = true; }
+                rows += `<div class="ssid-tip-r">`
+                      + `<i class="ssid-sw c${ssidOrder.indexOf(n) + 1}"></i>`
+                      + `<span class="nm">${vEsc(n)}</span>`
+                      + `<b>${v == null ? '–' : v}</b></div>`;
+            });
+
+            tip.innerHTML = `<div class="ssid-tip-h"><span>${when}</span><span>${ago}</span></div>`
+                          + (any ? rows + `<div class="ssid-tip-t"><span>total</span><b>${total}</b></div>`
+                                 : `<div class="ssid-tip-r"><span class="nm">no data</span></div>`);
+
+            // Flip to the left of the cursor in the right-hand 40% so the
+            // tooltip never runs off the card.
+            const gap = 12;
+            if (cx > ssidRect.width * 0.6) {
+                tip.style.right = (ssidRect.width - cx + gap).toFixed(1) + 'px';
+                tip.style.left = 'auto';
+            } else {
+                tip.style.left = (cx + gap).toFixed(1) + 'px';
+                tip.style.right = 'auto';
+            }
+        }
+
+        function ssidHoverFrame() {
+            ssidRaf = 0;
+            const g = ssidPlotGeom();
+            if (!g || !ssidBuckets) return;
+            let idx = Math.floor((ssidPendingX - SSID_GUTTER) / g.w * ssidBuckets);
+            idx = Math.max(0, Math.min(ssidBuckets - 1, idx));
+            if (idx === ssidHoverIdx) return;   // same bucket: no DOM work
+            ssidHoverIdx = idx;
+            paintSsidHover(idx);
+        }
+
+        function initSsidHover() {
+            const plot = document.getElementById('ssidPlot');
+            if (!plot) return;
+            plot.addEventListener('mouseenter', () => {
+                ssidRect = plot.getBoundingClientRect();
+                ssidHoverIdx = -1;
+                plot.classList.add('hov');
+            });
+            plot.addEventListener('mousemove', e => {
+                if (!ssidRect) ssidRect = plot.getBoundingClientRect();
+                ssidPendingX = e.clientX - ssidRect.left;
+                if (!ssidRaf) ssidRaf = requestAnimationFrame(ssidHoverFrame);
+            });
+            plot.addEventListener('mouseleave', () => {
+                plot.classList.remove('hov');
+                ssidHoverIdx = -1;
+            });
+            // The cached rect is only invalidated by geometry changes.
+            window.addEventListener('resize', () => { ssidRect = null; });
         }
 
         // Legend doubles as the colour key (§6: never colour alone). The
@@ -1238,6 +1431,7 @@
                 if (!d.success) return;
                 ssidSeries = d.series || {};
                 ssidBuckets = d.buckets || 0;
+                ssidT0 = d.t0 || 0;
                 ssidIntervalSec = d.interval || ssidIntervalSec;
                 ssidWindowHours = d.window_hours || ssidWindowHours;
                 ssidPeak = d.peak || 0;
@@ -1751,6 +1945,7 @@
         // sparklines are populated on the very first row render.
         Promise.all([fetchReachability(), fetchBandwidth()]).then(renderRouters);
         updateStats();
+        initSsidHover();
         fetchSsidClients();
 
         // Auto-refresh every 10 seconds

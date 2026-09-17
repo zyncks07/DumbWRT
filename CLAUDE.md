@@ -864,7 +864,8 @@ A full-width card under the stats strip showing **24 h of associated clients per
 SSID**, fleet-wide (summed over every router): one overlaid series per SSID, on
 the same overlay design as the per-router client graph (§15), with a y-scale and
 a time axis. The fleet runs three SSIDs — `LASKIE Hotspot`, `Juvilaskie`,
-`LASKIE No Restriction`.
+`LASKIE No Restriction`. Hovering reads out every SSID's value for the bucket
+under the pointer.
 
 > It shipped earlier the same day as a panel *inside* the stats strip, filling
 > the dead space right of the pills. At strip height that was a ~46 px ribbon
@@ -980,6 +981,41 @@ live in a 34 px gutter reserved by `.ssid-plot`'s `padding-left`, which
 the value itself always rounds up, so a max of 27 over 4 lines jumps to a step
 of 10 and draws two gridlines instead of five.
 
+### GOTCHA: the hover handler is gated twice, on purpose
+
+This is the dashboard's **only** `mousemove` handler, so it is deliberately
+cheap (§6, Atom CPU):
+
+1. Events are coalesced into one `requestAnimationFrame` — a fast drag does at
+   most one update per frame, not one per event.
+2. The update is then gated on the **bucket index** changing. At 720 buckets
+   over ~1830 px a bucket is ~2.5 px, so most frames resolve to the same bucket
+   and do no DOM work at all.
+
+The cursor **snaps to the bucket centre** rather than tracking the pointer.
+That is what makes gate 2 valid, and it also makes it unambiguous which sample
+is being read. Don't "smooth" it into following the mouse — that defeats the
+gate and re-renders the tooltip every frame.
+
+The plot rect is measured once per hover (`mouseenter`) and invalidated on
+`resize` and on repaint, never per `mousemove` — `getBoundingClientRect()` in a
+move handler forces a layout on every event.
+
+**Age comes from the server's bucket grid, not the browser clock**: the newest
+bucket is index `buckets-1`, so `age = (buckets-1-idx) * interval`. Same
+discipline as §13's rule about `mark_offline()` — no clock arithmetic in the
+browser for anything that could read as stale. The wall-clock label is the one
+exception, where local formatting is the whole point.
+
+The cursor and tooltip are **siblings of the `<svg>`, not children**:
+`renderSsidGraph()` replaces the svg wholesale on every refresh and they have to
+survive it. A refresh under a stationary pointer repaints the readout in place
+(the bucket grid shifted by one), rather than leaving the previous bucket's
+numbers on screen.
+
+A bucket where a series is null shows `–` and is left out of the total; a bucket
+with no series at all shows `no data`.
+
 ### Colours: a categorical ramp, kept off the status hues
 
 `static/theme.css` has `--s1..--s4` (cyan / violet / magenta / amber-brown),
@@ -1028,6 +1064,9 @@ rows already use.
 - **`templates/dashboard.html`** — `.ssid-card` / `.ssid-head` / `.ssid-legend`
   / `.ssid-plot` (200 px) / `.ssid-grid` / `.ssid-xaxis`. `renderSsidGraph()`,
   `renderSsidLegend()`, `ssidTrack()`, `niceStep()`, `fetchSsidClients()`.
+  Hover: `.ssid-cursor` / `.ssid-tip`, `initSsidHover()`, `ssidHoverFrame()`,
+  `paintSsidHover()`. `SSID_GUTTER` must stay equal to `.ssid-plot`'s
+  `padding-left` — the hover maths and `.ssid-grid`'s inset both depend on it.
   **`sparkOverlay()` is reused unchanged** — it was already generic over series
   count, CSS class and height. `SSID_PLOT_H` must stay equal to `.ssid-plot`'s
   CSS height: the SVG is `preserveAspectRatio="none"`, so a mismatch silently
@@ -1047,8 +1086,8 @@ Self-healing; no backfill, same as §14/§15.
   `/api/ssid-clients` response, browser-side.
 - **Four series is the cap** (`SSID_SERIES_MAX`, and `--s1..--s4`). Past that
   the overlay technique needs a different form — the same limit §15 hit at three.
-- **No hover readout.** At 720 points the card has the resolution for one, but
-  it would be the first mousemove handler on the dashboard (§6, Atom CPU).
+- **Hover is pointer-only.** No touch equivalent — mobile is a non-goal (§6).
+  The readout is also hover-only: there is no click-to-pin.
 - **No per-SSID bandwidth**, only client counts: the uplink is a single
   aggregate and the per-SSID wireless counters are the inflated ones (§13).
 - **An SSID renamed on the routers** appears as a new series; the old name ages
