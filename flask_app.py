@@ -430,6 +430,9 @@ def api_reachability():
 
 BANDWIDTH_BUCKET_DEFAULT = 360
 BANDWIDTH_WINDOW_HOURS_DEFAULT = 24
+# Overlaid series stay readable up to a handful; past that the technique
+# needs a different form (§15 open territory). The fleet runs three SSIDs.
+SSID_SERIES_MAX = 4
 
 
 @app.route('/api/bandwidth')
@@ -521,6 +524,43 @@ def api_bandwidth():
         elif row['clients'] is not None:
             # No split for this bucket, so the total is what gets drawn.
             entry['peak_clients'] = max(entry['peak_clients'], row['clients'])
+    # ---- fleet-wide per-SSID client counts (§16) ----
+    # Summed across every router per bucket, from ssid_history, which the
+    # collector writes on exactly these bucket boundaries. Ordered by peak
+    # descending so the busiest network takes the first colour, and capped
+    # at SSID_SERIES_MAX because the overlay technique stops being readable
+    # past a handful of series.
+    ssid_series: dict[str, list] = {}
+    cur.execute(
+        "SELECT ts, ssid, SUM(clients) AS n FROM ssid_history "
+        "WHERE ts >= ? GROUP BY ts, ssid ORDER BY ts ASC",
+        (t0,),
+    )
+    ssid_totals = [0] * buckets
+    for row in cur.fetchall():
+        idx = (row['ts'] - t0) // interval
+        if not (0 <= idx < buckets):
+            continue
+        pts = ssid_series.get(row['ssid'])
+        if pts is None:
+            pts = ssid_series[row['ssid']] = [None] * buckets
+        # Several pre-migration buckets can floor into one slot; last wins,
+        # the same rule /api/bandwidth already uses for its own series.
+        pts[idx] = row['n']
+        ssid_totals[idx] = (ssid_totals[idx] or 0) + row['n']
+
+    ranked = sorted(
+        ssid_series.items(),
+        key=lambda kv: max((v for v in kv[1] if v is not None), default=0),
+        reverse=True,
+    )[:SSID_SERIES_MAX]
+    # Peak of what is actually DRAWN. The series are overlaid, not stacked
+    # (§15), so that is the largest single SSID, not the fleet total —
+    # scaling to a total nothing draws would waste most of the height.
+    ssid_peak = max(
+        (v for _, pts in ranked for v in pts if v is not None), default=0
+    )
+
     conn.close()
 
     return jsonify({
@@ -530,6 +570,13 @@ def api_bandwidth():
         'buckets': buckets,
         't0': t0,
         'routers': out,
+        'ssids': {
+            'names': [name for name, _ in ranked],
+            'series': {name: pts for name, pts in ranked},
+            'peak': ssid_peak,
+            # The real fleet total, for the tooltip only.
+            'peak_total': max(ssid_totals) if ssid_totals else 0,
+        },
     })
 
 
@@ -546,8 +593,20 @@ def api_stats():
     total_interfaces = cursor.fetchone()['total']
     cursor.execute("SELECT CASE WHEN i.frequency < 3000 THEN '2.4GHz' WHEN i.frequency >= 5000 THEN '5GHz' ELSE 'Other' END as band, COUNT(*) as count FROM clients c LEFT JOIN interfaces i ON c.router_ip = i.router_ip AND c.interface = i.interface GROUP BY band")
     clients_by_band = {row['band']: row['count'] for row in cursor.fetchall()}
+    # Live per-SSID totals for the fleet SSID graph's legend (§16). The graph
+    # itself is a 24 h history on the 6-minute bucket, so its last point is up
+    # to a bucket old; the legend number comes from here instead, on the same
+    # 10 s cadence as every other pill in the strip. Same shape as the
+    # per-router rows: a live number beside a slower graph.
+    cursor.execute(
+        "SELECT i.ssid AS ssid, COUNT(*) AS count FROM clients c "
+        "JOIN interfaces i ON c.router_ip = i.router_ip "
+        "AND c.interface = i.interface "
+        "WHERE i.ssid IS NOT NULL AND i.ssid != '' GROUP BY i.ssid"
+    )
+    clients_by_ssid = {row['ssid']: row['count'] for row in cursor.fetchall()}
     conn.close()
-    return jsonify({'success': True, 'routers': routers_stats, 'clients_total': clients_total, 'total_interfaces': total_interfaces, 'clients_by_band': clients_by_band})
+    return jsonify({'success': True, 'routers': routers_stats, 'clients_total': clients_total, 'total_interfaces': total_interfaces, 'clients_by_band': clients_by_band, 'clients_by_ssid': clients_by_ssid})
 
 @app.route('/api/config', methods=['GET', 'POST'])
 @login_required

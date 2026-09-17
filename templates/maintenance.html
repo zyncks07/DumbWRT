@@ -251,8 +251,9 @@
             Old rows are deleted once per day; a <code>VACUUM</code> reclaims disk space.
             <br>Snapshot interval controls how often history rows are written (default 300 s = 5 min).
             Requires a collector restart to take effect.
-            <br><code>bandwidth_history</code> is <em>not</em> covered by this setting — it keeps its
-            own 24&nbsp;h window (<code>bandwidth_window_hours</code>) and trims itself on every write.
+            <br><code>bandwidth_history</code> and <code>ssid_history</code> are <em>not</em> covered by
+            this setting — they keep their own 24&nbsp;h window
+            (<code>bandwidth_window_hours</code>) and trim themselves on every write.
         </div>
     </div>
 
@@ -292,6 +293,7 @@
         <div class="status-row"><span class="k">router_status_history rows</span><span class="v" id="sz-rh">—</span></div>
         <div class="status-row"><span class="k">system_metrics rows</span><span class="v" id="sz-sm">—</span></div>
         <div class="status-row"><span class="k">bandwidth_history rows</span><span class="v" id="sz-bw">—</span></div>
+        <div class="status-row"><span class="k">ssid_history rows</span><span class="v" id="sz-sh">—</span></div>
     </div>
 
     <div class="card" style="grid-column: 1 / -1;">
@@ -378,6 +380,7 @@ async function load() {
     $('sz-rh').textContent = z.router_status_history.toLocaleString();
     $('sz-sm').textContent = z.system_metrics.toLocaleString();
     $('sz-bw').textContent = (z.bandwidth_history || 0).toLocaleString();
+    $('sz-sh').textContent = (z.ssid_history || 0).toLocaleString();
 
     await loadBackups();
 }

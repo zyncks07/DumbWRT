@@ -32,6 +32,19 @@
     --ok:   var(--accent-2);
     --warn: #ffb800;
     --err:  #ff4757;
+
+    /* Categorical series (SSID graph, §16). Identity only — these carry no
+     * good/bad meaning, so they deliberately avoid the status hues above:
+     * green, amber and red are reserved for online / degraded / offline
+     * (§6), and a series painted in one of them would read as a verdict.
+     * Cyan / violet / magenta are three distinguishable hues outside that
+     * set, and every use is paired with the SSID name (§6 "never colour
+     * alone"). --s1 doubles as --accent by design: the first series is the
+     * busiest one, and the accent is the page's most legible hue. */
+    --s1: #00d4ff;
+    --s2: #b58cff;
+    --s3: #ff6ec7;
+    --s4: #ffa94d;
 }
 
 [data-theme="light"] {
@@ -54,6 +67,13 @@
 
     --warn: #b87800;
     --err:  #c12a2a;
+
+    /* Darkened for contrast against the light ground — the dark-mode
+     * values wash out at 0.2 fill opacity on white. */
+    --s1: #0086b3;
+    --s2: #6d28d9;
+    --s3: #c2187f;
+    --s4: #b45309;
 }
 
 /* When the gradient is painted as background-clip:text (e.g. <h1>),

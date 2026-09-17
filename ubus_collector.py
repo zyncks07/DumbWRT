@@ -222,6 +222,36 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bw_router_ts ON bandwidth_history(router_ip, ts)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bw_ts ON bandwidth_history(ts)")
 
+    # ---- per-SSID associated-client counts (fleet graph, §16) ----
+    # One row per (bucket, router, SSID), carrying the mean number of clients
+    # on that SSID over the polls that landed in the bucket. Deliberately a
+    # separate table rather than more columns on bandwidth_history: that table
+    # is one row per router per bucket, and an SSID set is a variable-width
+    # dimension that would need either a column per SSID (renaming an SSID
+    # would need a migration) or a JSON blob.
+    #
+    # It rides bandwidth_history's bucket boundaries, window and
+    # self-cleaning-on-write retention, so the dashboard can index both with
+    # the same arithmetic and neither waits on the daily retention pass.
+    #
+    # Stored per-router even though the graph is fleet-wide, because that is
+    # where the data is produced — each router task owns its own accumulator
+    # and flushes independently. The API sums across routers per bucket.
+    # Zero-client SSIDs are stored too: a configured-but-empty SSID is a real
+    # zero, not a gap, and dropping those rows would make an all-quiet bucket
+    # indistinguishable from an offline one.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ssid_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            router_ip TEXT NOT NULL,
+            ssid TEXT NOT NULL,
+            clients INTEGER NOT NULL
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ssid_hist_router_ts ON ssid_history(router_ip, ts)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ssid_hist_ts ON ssid_history(ts)")
+
     # ---- pfSense ARP cache (P2 #10) ----
     # MAC is canonicalised to lowercase so JOINs against clients.mac
     # (which is whatever case the AP reported) work via lower().
@@ -831,6 +861,37 @@ def save_bandwidth_bucket(router_ip: str, ts: int, rx: int, tx: int,
         conn.close()
 
 
+def save_ssid_bucket(router_ip: str, ts: int, counts: dict[str, int],
+                     window_hours: int):
+    """Append this router's per-SSID client means for one closed bucket.
+
+    Self-cleaning on write, on the same window as save_bandwidth_bucket, so
+    the table stays pinned at ~(window / bucket) x (SSIDs on this router)
+    rows per router and never waits on the daily retention pass.
+
+    Every SSID the router had an interface for is written, zeros included —
+    see the table comment in init_db().
+    """
+    if not counts:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.executemany(
+            "INSERT INTO ssid_history (ts, router_ip, ssid, clients) "
+            "VALUES (?, ?, ?, ?)",
+            [(ts, router_ip, ssid, n) for ssid, n in counts.items()],
+        )
+        cur.execute(
+            "DELETE FROM ssid_history WHERE router_ip=? AND ts < ?",
+            (router_ip, ts - window_hours * 3600),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+
 def save_history(router_ip: str, interfaces: list[dict],
                  system_info: Optional[dict], now: str):
     """Append one snapshot's worth of rows to the history tables."""
@@ -1012,12 +1073,20 @@ async def poll_once(conn: asyncssh.SSHClientConnection, router_ip: str,
     # the SQL convention used everywhere else (<3000 = 2.4G, >=5000 = 5G); an
     # interface in neither band counts toward the total only.
     clients_24 = clients_5 = 0
+    # Per-SSID counts for the fleet graph (§16), summed over this router's
+    # bands: one SSID normally exists as both a 2.4G and a 5G interface, and
+    # the graph tracks the network, not the radio. Seeded at 0 for every SSID
+    # present so a configured-but-empty SSID records a real zero.
+    ssid_counts: dict[str, int] = {}
     for dev in devices:
         info = await ubus_call(conn, "iwinfo", "info", {"device": dev}) or {}
         assoc = await ubus_call(conn, "iwinfo", "assoclist", {"device": dev}) or {}
         clients = [parse_client(c) for c in assoc.get("results", [])]
         interfaces.append({"device": dev, "info": info, "clients": clients})
         total_clients += len(clients)
+        ssid = info.get("ssid")
+        if ssid:
+            ssid_counts[ssid] = ssid_counts.get(ssid, 0) + len(clients)
         freq = info.get("frequency")
         if not freq:
             pass  # interface down / frequency unknown: total only
@@ -1074,7 +1143,7 @@ async def poll_once(conn: asyncssh.SSHClientConnection, router_ip: str,
         pass
 
     return (hostname, interfaces, system_info, len(devices), total_clients,
-            clients_24, clients_5, counters, topology)
+            clients_24, clients_5, ssid_counts, counters, topology)
 
 
 async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
@@ -1109,6 +1178,10 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
     # per-band sums ride the same divisor (acc_cli_n).
     acc_cli_sum = acc_cli_n = 0
     acc_cli24_sum = acc_cli5_sum = 0
+    # Per-SSID sums, on the same divisor again. Keyed by SSID rather than by
+    # interface: one SSID is normally two interfaces (2.4G + 5G) and the
+    # fleet graph tracks the network, not the radio.
+    acc_ssid_sum: dict[str, int] = {}
     # Force a topology probe on the first poll after every (re)connect.
     last_topo_mono = -float("inf")
 
@@ -1145,7 +1218,7 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
             write_history = (now_mono - last_history_mono) >= history_interval
             refresh_topo = (now_mono - last_topo_mono) >= TOPO_REFRESH_SECONDS
             (host, interfaces, system_info, n_dev, n_cli, n_cli24, n_cli5,
-             counters, topology) = await poll_once(
+             ssid_counts, counters, topology) = await poll_once(
                 conn, router_ip,
                 fetch_system=write_history, fetch_topology=refresh_topo,
             )
@@ -1202,14 +1275,24 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
                         round(acc_cli5_sum / acc_cli_n) if acc_cli_n else None,
                         bw_window,
                     )
+                if acc_cli_n:
+                    save_ssid_bucket(
+                        router_ip, bucket_start,
+                        {ssid: round(total / acc_cli_n)
+                         for ssid, total in acc_ssid_sum.items()},
+                        bw_window,
+                    )
                 bucket_start = bucket
                 acc_rx = acc_tx = 0
                 acc_span = 0.0
                 acc_cli_sum = acc_cli_n = 0
                 acc_cli24_sum = acc_cli5_sum = 0
+                acc_ssid_sum = {}
             acc_cli_sum += n_cli
             acc_cli24_sum += n_cli24
             acc_cli5_sum += n_cli5
+            for _ssid, _n in ssid_counts.items():
+                acc_ssid_sum[_ssid] = acc_ssid_sum.get(_ssid, 0) + _n
             acc_cli_n += 1
 
             if counters:

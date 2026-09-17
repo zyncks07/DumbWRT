@@ -111,6 +111,111 @@
             font-variant-numeric: tabular-nums;
         }
 
+        /* ---- fleet clients-by-SSID graph (§16) ----
+           Fills the dead space on the right of the stats strip: the pills
+           are all fixed-width, so everything past the last one was unused
+           at any window width above ~900px. margin-left:auto pins it to the
+           right edge and it takes whatever is left over. */
+        .ssid-panel {
+            margin-left: auto;
+            flex: 1 1 340px;
+            min-width: 240px;
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }
+        .ssid-head {
+            display: flex;
+            align-items: baseline;
+            gap: 10px;
+            font-size: 10px;
+            line-height: 1;
+            flex-wrap: wrap;
+        }
+        .ssid-title {
+            color: var(--fg-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            white-space: nowrap;
+        }
+        /* The legend is the SSID graph's "never colour alone" half (§6):
+           every series is named here, with its live count. */
+        .ssid-legend {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            min-width: 0;
+        }
+        .ssid-lg {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            color: var(--fg-muted);
+            max-width: 160px;
+        }
+        .ssid-lg .nm {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .ssid-lg b {
+            color: var(--fg);
+            font-variant-numeric: tabular-nums;
+            font-weight: 600;
+        }
+        .ssid-sw {
+            width: 8px;
+            height: 8px;
+            border-radius: 2px;
+            flex: none;
+        }
+        .ssid-graph {
+            display: flex;
+            height: 46px;
+            min-width: 0;
+        }
+        .ssid-spark {
+            flex: 1 1 auto;
+            min-width: 0;
+            height: 46px;
+            display: block;
+            background: var(--card-bg-3);
+            border-radius: 2px;
+        }
+        .ssid-empty {
+            flex: 1 1 auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--card-bg-3);
+            border-radius: 2px;
+            color: var(--fg-muted);
+            font-size: 10px;
+        }
+        /* Same overlay treatment as the per-router client graph: translucent
+           fills so a crossing composites to a blend, opaque strokes drawn
+           above every fill so each series stays traceable through it. Set in
+           CSS rather than as fill=/stroke= attributes because var() is only
+           valid in a declaration. */
+        .ss-a1 { fill: var(--s1); fill-opacity: 0.20; }
+        .ss-a2 { fill: var(--s2); fill-opacity: 0.20; }
+        .ss-a3 { fill: var(--s3); fill-opacity: 0.20; }
+        .ss-a4 { fill: var(--s4); fill-opacity: 0.20; }
+        .ss-l1, .ss-l2, .ss-l3, .ss-l4 {
+            fill: none;
+            stroke-width: 1.25;
+            stroke-linejoin: round;
+            vector-effect: non-scaling-stroke;
+        }
+        .ss-l1 { stroke: var(--s1); }
+        .ss-l2 { stroke: var(--s2); }
+        .ss-l3 { stroke: var(--s3); }
+        .ss-l4 { stroke: var(--s4); }
+        .ssid-sw.c1 { background: var(--s1); }
+        .ssid-sw.c2 { background: var(--s2); }
+        .ssid-sw.c3 { background: var(--s3); }
+        .ssid-sw.c4 { background: var(--s4); }
+
         .interfaces-list {
             padding: 0 16px 12px;
         }
@@ -641,6 +746,16 @@
             <span class="stat-pill-label">5 GHz</span>
             <span class="stat-pill-value" id="clients5">0</span>
         </div>
+
+        <div class="ssid-panel" id="ssidPanel">
+            <div class="ssid-head">
+                <span class="ssid-title">Clients by SSID · 24h</span>
+                <span class="ssid-legend" id="ssidLegend"></span>
+            </div>
+            <div class="ssid-graph" id="ssidGraph">
+                <div class="ssid-empty">no data yet</div>
+            </div>
+        </div>
     </div>
 
     <div class="router-table" id="routersTable">
@@ -685,6 +800,38 @@
         // a total nothing draws would waste half the height.
         const CL_MIN_SCALE = 4;
         let clPeak = CL_MIN_SCALE;
+
+        // ---- fleet clients-by-SSID graph (§16) ----
+        // Colour is assigned by position in ssidOrder, and the order is
+        // ALPHABETICAL rather than by traffic. An ops console is watched
+        // daily, so "LASKIE Hotspot is the cyan one" has to hold across
+        // reloads — ranking by clients would reshuffle the colours whenever
+        // two networks traded places, and the two feeds here (live counts
+        // from /api/stats, history from /api/bandwidth) don't even agree on
+        // an order at the same instant. Sorting by name is the only rule
+        // that gives the same answer in every browser on every load.
+        //
+        // Both feeds contribute names: /api/stats is live and has SSIDs on a
+        // fresh install before any history exists; /api/bandwidth has SSIDs
+        // with history but no clients right now.
+        const SSID_COLORS = 4;         // matches --s1..--s4 and .ss-a/.ss-l
+        const SSID_MIN_SCALE = 4;      // floor, as for the per-router graph
+        let ssidOrder = [];
+        let ssidSeries = {};
+        let ssidPeak = SSID_MIN_SCALE;
+        let ssidPeakTotal = 0;
+        let ssidLive = {};
+
+        // Returns true when the set changed, so only a real change repaints.
+        // The API has already capped what it sends to the busiest few; this
+        // cap is the local backstop for the union of the two feeds.
+        function ssidTrack(names) {
+            const before = ssidOrder.join('\u0000');
+            const set = new Set(ssidOrder);
+            (names || []).forEach(n => { if (n) set.add(n); });
+            ssidOrder = Array.from(set).sort().slice(0, SSID_COLORS);
+            return ssidOrder.join('\u0000') !== before;
+        }
 
         // Bare magnitude, for the tooltip where "bps" is spelled out once.
         function fmtBps(bps) {
@@ -813,6 +960,52 @@
             return `<svg class="${cls}" viewBox="0 0 ${n} ${H}" preserveAspectRatio="none">${areas}${lines}</svg>`;
         }
 
+        // The fleet graph: one overlaid series per SSID, on the same shared
+        // linear scale, drawn by the same sparkOverlay as the per-router
+        // client graph. Shared scale is the whole point — the question is
+        // which network is carrying the fleet, and per-series auto-scaling
+        // would draw a 2-client SSID and a 19-client one identically.
+        //
+        // Scaled to the largest single SSID, not the fleet total: the series
+        // are overlaid rather than stacked (§15), so the total is never drawn
+        // and scaling to it would waste most of the height. The total is in
+        // the tooltip, and in the Clients pill two columns to the left.
+        function renderSsidGraph() {
+            const box = document.getElementById('ssidGraph');
+            if (!box) return;
+            const names = ssidOrder.filter(n => (ssidSeries[n] || []).some(v => v != null));
+            if (!names.length || !bwBuckets) {
+                box.innerHTML = '<div class="ssid-empty">no data yet</div>';
+                box.removeAttribute('title');
+                return;
+            }
+            const max = Math.max(ssidPeak, SSID_MIN_SCALE);
+            box.innerHTML = sparkOverlay(
+                names.map(n => {
+                    const i = ssidOrder.indexOf(n) + 1;
+                    return {points: ssidSeries[n], area: `ss-a${i}`, line: `ss-l${i}`};
+                }),
+                max, {n: bwBuckets, height: 46, cls: 'ssid-spark'});
+            box.title = `Associated clients per SSID, last ${bwWindowHours}h`
+                      + ` · ${Math.round(bwIntervalSec / 60)}-minute average`
+                      + ` · scale 0–${max} (busiest SSID)`
+                      + ` · fleet peak ${ssidPeakTotal}`;
+        }
+
+        // Legend doubles as the colour key (§6: never colour alone). The
+        // count is the live one from /api/stats on the 10s cadence, not the
+        // graph's last bucket, which is up to one bucket period stale.
+        function renderSsidLegend() {
+            const el = document.getElementById('ssidLegend');
+            if (!el) return;
+            el.innerHTML = ssidOrder.map((n, i) =>
+                `<span class="ssid-lg" title="${vEsc(n)}">`
+                + `<i class="ssid-sw c${i + 1}"></i>`
+                + `<span class="nm">${vEsc(n)}</span>`
+                + `<b>${ssidLive[n] != null ? ssidLive[n] : 0}</b></span>`
+            ).join('');
+        }
+
         function bwRows(ip, router) {
             const d = bwData[ip];
             const empty = new Array(d ? d.in.length : bwBuckets).fill(null);
@@ -926,6 +1119,14 @@
                     paintBw(ip, currentRouterData[ip]);
                     paintCl(ip, currentRouterData[ip]);
                 });
+                // The fleet SSID graph rides this same response — same
+                // buckets, same window, so it costs no extra request.
+                const sd = d.ssids || {};
+                ssidSeries = sd.series || {};
+                ssidPeak = sd.peak || 0;
+                ssidPeakTotal = sd.peak_total || 0;
+                if (ssidTrack(sd.names)) renderSsidLegend();
+                renderSsidGraph();
             } catch (e) {
                 console.error('bandwidth fetch failed', e);
             }
@@ -1412,6 +1613,15 @@
                     document.getElementById('totalClients').textContent = data.clients_total || 0;
                     document.getElementById('clients24').textContent = data.clients_by_band['2.4GHz'] || 0;
                     document.getElementById('clients5').textContent = data.clients_by_band['5GHz'] || 0;
+
+                    // Live counts for the SSID legend, and the second source
+                    // of SSID names (see ssidTrack).
+                    ssidLive = data.clients_by_ssid || {};
+                    // A changed set shifts the colour assignment, so the
+                    // graph has to be repainted with it, not just the legend.
+                    if (ssidTrack(Object.keys(ssidLive))) renderSsidGraph();
+                    renderSsidLegend();
+
                     
                     const now = new Date();
                     document.getElementById('lastUpdate').textContent = 
