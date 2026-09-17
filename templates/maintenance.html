@@ -254,6 +254,9 @@
             <br><code>bandwidth_history</code> and <code>ssid_history</code> are <em>not</em> covered by
             this setting — they keep their own 24&nbsp;h window
             (<code>bandwidth_window_hours</code>) and trim themselves on every write.
+            <code>ssid_history</code> runs on a finer bucket than the per-router graphs
+            (<code>ssid_interval</code>, default 120&nbsp;s) because it is drawn full-width;
+            changing it clears the table and the graph refills over the next 24&nbsp;h.
         </div>
     </div>
 

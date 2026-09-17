@@ -111,26 +111,26 @@
             font-variant-numeric: tabular-nums;
         }
 
-        /* ---- fleet clients-by-SSID graph (§16) ----
-           Fills the dead space on the right of the stats strip: the pills
-           are all fixed-width, so everything past the last one was unused
-           at any window width above ~900px. margin-left:auto pins it to the
-           right edge and it takes whatever is left over. */
-        .ssid-panel {
-            margin-left: auto;
-            flex: 1 1 340px;
-            min-width: 240px;
-            display: flex;
-            flex-direction: column;
-            gap: 3px;
+        /* ---- fleet clients-by-SSID card (§16) ----
+           Its own card below the stats strip rather than a panel inside it:
+           at strip height the graph was a ~46px ribbon across a 24h window,
+           too flat to read a shape from. Full width and ~4x the strip's
+           height gives it room for an actual scale. */
+        .ssid-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-a);
+            border-radius: 10px;
+            padding: 10px 18px 8px;
+            margin-bottom: 12px;
         }
         .ssid-head {
             display: flex;
             align-items: baseline;
-            gap: 10px;
+            gap: 14px;
             font-size: 10px;
             line-height: 1;
             flex-wrap: wrap;
+            margin-bottom: 8px;
         }
         .ssid-title {
             color: var(--fg-muted);
@@ -142,16 +142,17 @@
            every series is named here, with its live count. */
         .ssid-legend {
             display: flex;
-            gap: 10px;
+            gap: 14px;
             flex-wrap: wrap;
             min-width: 0;
         }
         .ssid-lg {
             display: inline-flex;
             align-items: center;
-            gap: 4px;
+            gap: 5px;
             color: var(--fg-muted);
-            max-width: 160px;
+            font-size: 11px;
+            max-width: 240px;
         }
         .ssid-lg .nm {
             overflow: hidden;
@@ -164,33 +165,78 @@
             font-weight: 600;
         }
         .ssid-sw {
-            width: 8px;
-            height: 8px;
+            width: 9px;
+            height: 9px;
             border-radius: 2px;
             flex: none;
         }
-        .ssid-graph {
-            display: flex;
-            height: 46px;
+        .ssid-peak {
+            margin-left: auto;
+            color: var(--fg-muted);
+            font-size: 10px;
+            white-space: nowrap;
+        }
+
+        /* Plot area. The gridlines are absolutely-positioned HTML rather than
+           SVG lines because the SVG uses preserveAspectRatio="none" — text
+           inside it would be stretched horizontally along with the paths. */
+        .ssid-plot {
+            position: relative;
+            height: 200px;
+            padding-left: 34px;   /* gutter for the y labels */
             min-width: 0;
         }
+        /* Transparent: the plot ground is painted by .ssid-grid, which is an
+           earlier sibling and therefore *behind* this. Giving the SVG its own
+           background would hide the gridlines under it. */
         .ssid-spark {
-            flex: 1 1 auto;
-            min-width: 0;
-            height: 46px;
+            position: relative;
+            width: 100%;
+            height: 100%;
             display: block;
+            background: transparent;
+        }
+        .ssid-grid {
+            position: absolute;
+            inset: 0 0 0 34px;
             background: var(--card-bg-3);
             border-radius: 2px;
+            pointer-events: none;
+        }
+        .ssid-gl {
+            position: absolute;
+            left: 0;
+            right: 0;
+            height: 0;
+            border-top: 1px dashed var(--border-b);
+            opacity: 0.7;
+        }
+        .ssid-gl span {
+            position: absolute;
+            right: calc(100% + 6px);
+            top: -0.6em;
+            color: var(--fg-muted);
+            font-size: 9px;
+            font-variant-numeric: tabular-nums;
+        }
+        .ssid-xaxis {
+            display: flex;
+            justify-content: space-between;
+            margin: 3px 0 0 34px;
+            color: var(--fg-muted);
+            font-size: 9px;
+            font-variant-numeric: tabular-nums;
         }
         .ssid-empty {
-            flex: 1 1 auto;
+            position: absolute;
+            inset: 0 0 0 34px;
             display: flex;
             align-items: center;
             justify-content: center;
             background: var(--card-bg-3);
             border-radius: 2px;
             color: var(--fg-muted);
-            font-size: 10px;
+            font-size: 11px;
         }
         /* Same overlay treatment as the per-router client graph: translucent
            fills so a crossing composites to a blend, opaque strokes drawn
@@ -203,7 +249,7 @@
         .ss-a4 { fill: var(--s4); fill-opacity: 0.20; }
         .ss-l1, .ss-l2, .ss-l3, .ss-l4 {
             fill: none;
-            stroke-width: 1.25;
+            stroke-width: 1.4;
             stroke-linejoin: round;
             vector-effect: non-scaling-stroke;
         }
@@ -746,16 +792,19 @@
             <span class="stat-pill-label">5 GHz</span>
             <span class="stat-pill-value" id="clients5">0</span>
         </div>
+    </div>
 
-        <div class="ssid-panel" id="ssidPanel">
-            <div class="ssid-head">
-                <span class="ssid-title">Clients by SSID · 24h</span>
-                <span class="ssid-legend" id="ssidLegend"></span>
-            </div>
-            <div class="ssid-graph" id="ssidGraph">
-                <div class="ssid-empty">no data yet</div>
-            </div>
+    <div class="ssid-card" id="ssidCard">
+        <div class="ssid-head">
+            <span class="ssid-title">Clients by SSID · 24h</span>
+            <span class="ssid-legend" id="ssidLegend"></span>
+            <span class="ssid-peak" id="ssidPeak"></span>
         </div>
+        <div class="ssid-plot" id="ssidPlot">
+            <div class="ssid-grid" id="ssidGrid"></div>
+            <div class="ssid-empty">no data yet</div>
+        </div>
+        <div class="ssid-xaxis" id="ssidXaxis"></div>
     </div>
 
     <div class="router-table" id="routersTable">
@@ -812,12 +861,19 @@
         // that gives the same answer in every browser on every load.
         //
         // Both feeds contribute names: /api/stats is live and has SSIDs on a
-        // fresh install before any history exists; /api/bandwidth has SSIDs
-        // with history but no clients right now.
+        // fresh install before any history exists; /api/ssid-clients has
+        // SSIDs with history but no clients right now.
         const SSID_COLORS = 4;         // matches --s1..--s4 and .ss-a/.ss-l
         const SSID_MIN_SCALE = 4;      // floor, as for the per-router graph
+        // viewBox height for the plot. Matches .ssid-plot's CSS height so the
+        // path geometry is 1:1 with pixels — the SVG is preserveAspectRatio
+        // ="none", so any other value would silently scale y against x.
+        const SSID_PLOT_H = 200;
         let ssidOrder = [];
         let ssidSeries = {};
+        let ssidBuckets = 0;
+        let ssidIntervalSec = 120;
+        let ssidWindowHours = 24;
         let ssidPeak = SSID_MIN_SCALE;
         let ssidPeakTotal = 0;
         let ssidLive = {};
@@ -960,6 +1016,18 @@
             return `<svg class="${cls}" viewBox="0 0 ${n} ${H}" preserveAspectRatio="none">${areas}${lines}</svg>`;
         }
 
+        // Nice round gridline step for a max: 1/2/5 x 10^n, aiming for
+        // roughly `target` lines. Keeps the y labels whole client counts.
+        // Thresholds are the classic 1.5/3/7 midpoints, not 1/2/5 — rounding
+        // at the value itself always rounds up, so a max of 27 over 4 lines
+        // would jump to a step of 10 and draw two gridlines instead of five.
+        function niceStep(max, target) {
+            const raw = max / Math.max(1, target);
+            const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+            const n = raw / pow;
+            return Math.max(1, (n < 1.5 ? 1 : n < 3 ? 2 : n < 7 ? 5 : 10) * pow);
+        }
+
         // The fleet graph: one overlaid series per SSID, on the same shared
         // linear scale, drawn by the same sparkOverlay as the per-router
         // client graph. Shared scale is the whole point — the question is
@@ -968,28 +1036,67 @@
         //
         // Scaled to the largest single SSID, not the fleet total: the series
         // are overlaid rather than stacked (§15), so the total is never drawn
-        // and scaling to it would waste most of the height. The total is in
-        // the tooltip, and in the Clients pill two columns to the left.
+        // and scaling to it would waste most of the height. The total is
+        // stated beside the legend instead.
         function renderSsidGraph() {
-            const box = document.getElementById('ssidGraph');
-            if (!box) return;
+            const plot = document.getElementById('ssidPlot');
+            const grid = document.getElementById('ssidGrid');
+            const xax = document.getElementById('ssidXaxis');
+            const pk = document.getElementById('ssidPeak');
+            if (!plot) return;
+
             const names = ssidOrder.filter(n => (ssidSeries[n] || []).some(v => v != null));
-            if (!names.length || !bwBuckets) {
-                box.innerHTML = '<div class="ssid-empty">no data yet</div>';
-                box.removeAttribute('title');
+            const old = plot.querySelector('.ssid-spark, .ssid-empty');
+            if (!names.length || !ssidBuckets) {
+                if (old) old.outerHTML = '<div class="ssid-empty">no data yet</div>';
+                if (grid) grid.innerHTML = '';
+                if (xax) xax.innerHTML = '';
+                if (pk) pk.textContent = '';
+                plot.removeAttribute('title');
                 return;
             }
+
             const max = Math.max(ssidPeak, SSID_MIN_SCALE);
-            box.innerHTML = sparkOverlay(
+            const svg = sparkOverlay(
                 names.map(n => {
                     const i = ssidOrder.indexOf(n) + 1;
                     return {points: ssidSeries[n], area: `ss-a${i}`, line: `ss-l${i}`};
                 }),
-                max, {n: bwBuckets, height: 46, cls: 'ssid-spark'});
-            box.title = `Associated clients per SSID, last ${bwWindowHours}h`
-                      + ` · ${Math.round(bwIntervalSec / 60)}-minute average`
-                      + ` · scale 0–${max} (busiest SSID)`
-                      + ` · fleet peak ${ssidPeakTotal}`;
+                max, {n: ssidBuckets, height: SSID_PLOT_H, cls: 'ssid-spark'});
+            // Replace the plot's own child, not the whole container — the
+            // gridline layer is a sibling and must survive the repaint.
+            if (old) old.outerHTML = svg; else plot.insertAdjacentHTML('beforeend', svg);
+
+            // Gridlines, bottom-up, at whole-client steps. The 0 line is the
+            // baseline the areas already sit on, so it is skipped.
+            if (grid) {
+                const step = niceStep(max, 4);
+                let g = '';
+                for (let v = step; v <= max; v += step) {
+                    g += `<div class="ssid-gl" style="top:${(100 * (1 - v / max)).toFixed(3)}%">`
+                       + `<span>${v}</span></div>`;
+                }
+                grid.innerHTML = g;
+            }
+
+            // Time axis: one label per 6h, oldest on the left.
+            if (xax) {
+                const span = ssidWindowHours;
+                const marks = [];
+                for (let h = span; h > 0; h -= 6) marks.push(`-${h}h`);
+                marks.push('now');
+                xax.innerHTML = marks.map(m => `<span>${m}</span>`).join('');
+            }
+
+            if (pk) {
+                pk.textContent = `peak ${ssidPeakTotal} total`
+                    + ` · ${Math.round(ssidIntervalSec / 60)}-min avg`;
+            }
+            plot.title = `Associated clients per SSID, last ${ssidWindowHours}h`
+                       + ` · ${Math.round(ssidIntervalSec / 60)}-minute average`
+                       + ` · ${ssidBuckets} points`
+                       + ` · scale 0–${max} (busiest single SSID)`
+                       + ` · fleet peak ${ssidPeakTotal}`;
         }
 
         // Legend doubles as the colour key (§6: never colour alone). The
@@ -1119,16 +1226,26 @@
                     paintBw(ip, currentRouterData[ip]);
                     paintCl(ip, currentRouterData[ip]);
                 });
-                // The fleet SSID graph rides this same response — same
-                // buckets, same window, so it costs no extra request.
-                const sd = d.ssids || {};
-                ssidSeries = sd.series || {};
-                ssidPeak = sd.peak || 0;
-                ssidPeakTotal = sd.peak_total || 0;
-                if (ssidTrack(sd.names)) renderSsidLegend();
-                renderSsidGraph();
             } catch (e) {
                 console.error('bandwidth fetch failed', e);
+            }
+        }
+
+        async function fetchSsidClients() {
+            try {
+                const r = await fetch('/api/ssid-clients');
+                const d = await r.json();
+                if (!d.success) return;
+                ssidSeries = d.series || {};
+                ssidBuckets = d.buckets || 0;
+                ssidIntervalSec = d.interval || ssidIntervalSec;
+                ssidWindowHours = d.window_hours || ssidWindowHours;
+                ssidPeak = d.peak || 0;
+                ssidPeakTotal = d.peak_total || 0;
+                if (ssidTrack(d.names)) renderSsidLegend();
+                renderSsidGraph();
+            } catch (e) {
+                console.error('ssid-clients fetch failed', e);
             }
         }
 
@@ -1634,6 +1751,7 @@
         // sparklines are populated on the very first row render.
         Promise.all([fetchReachability(), fetchBandwidth()]).then(renderRouters);
         updateStats();
+        fetchSsidClients();
 
         // Auto-refresh every 10 seconds
         setInterval(() => {
@@ -1651,6 +1769,15 @@
             setTimeout(() => {
                 fetchBandwidth().finally(scheduleBandwidth);
             }, Math.max(30, bwIntervalSec) * 1000);
+        })();
+        // The SSID graph is on its own, finer bucket, so it gets its own
+        // chain rather than riding the bandwidth one — at 120s vs 360s,
+        // sharing would either stale the SSID card by two buckets or
+        // re-serialise every router's sparkline three times per bucket.
+        (function scheduleSsid() {
+            setTimeout(() => {
+                fetchSsidClients().finally(scheduleSsid);
+            }, Math.max(30, ssidIntervalSec) * 1000);
         })();
     </script>
     <script src="/static/copy-utils.js"></script>

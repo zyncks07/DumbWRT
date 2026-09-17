@@ -433,6 +433,10 @@ BANDWIDTH_WINDOW_HOURS_DEFAULT = 24
 # Overlaid series stay readable up to a handful; past that the technique
 # needs a different form (§15 open territory). The fleet runs three SSIDs.
 SSID_SERIES_MAX = 4
+# The fleet SSID graph is a full-width card, so it resolves 3x finer than the
+# per-router sparkline columns. Its own key, not bandwidth_interval — see the
+# collector's SSID_BUCKET_DEFAULT.
+SSID_BUCKET_DEFAULT = 120
 
 
 @app.route('/api/bandwidth')
@@ -524,43 +528,6 @@ def api_bandwidth():
         elif row['clients'] is not None:
             # No split for this bucket, so the total is what gets drawn.
             entry['peak_clients'] = max(entry['peak_clients'], row['clients'])
-    # ---- fleet-wide per-SSID client counts (§16) ----
-    # Summed across every router per bucket, from ssid_history, which the
-    # collector writes on exactly these bucket boundaries. Ordered by peak
-    # descending so the busiest network takes the first colour, and capped
-    # at SSID_SERIES_MAX because the overlay technique stops being readable
-    # past a handful of series.
-    ssid_series: dict[str, list] = {}
-    cur.execute(
-        "SELECT ts, ssid, SUM(clients) AS n FROM ssid_history "
-        "WHERE ts >= ? GROUP BY ts, ssid ORDER BY ts ASC",
-        (t0,),
-    )
-    ssid_totals = [0] * buckets
-    for row in cur.fetchall():
-        idx = (row['ts'] - t0) // interval
-        if not (0 <= idx < buckets):
-            continue
-        pts = ssid_series.get(row['ssid'])
-        if pts is None:
-            pts = ssid_series[row['ssid']] = [None] * buckets
-        # Several pre-migration buckets can floor into one slot; last wins,
-        # the same rule /api/bandwidth already uses for its own series.
-        pts[idx] = row['n']
-        ssid_totals[idx] = (ssid_totals[idx] or 0) + row['n']
-
-    ranked = sorted(
-        ssid_series.items(),
-        key=lambda kv: max((v for v in kv[1] if v is not None), default=0),
-        reverse=True,
-    )[:SSID_SERIES_MAX]
-    # Peak of what is actually DRAWN. The series are overlaid, not stacked
-    # (§15), so that is the largest single SSID, not the fleet total —
-    # scaling to a total nothing draws would waste most of the height.
-    ssid_peak = max(
-        (v for _, pts in ranked for v in pts if v is not None), default=0
-    )
-
     conn.close()
 
     return jsonify({
@@ -570,13 +537,81 @@ def api_bandwidth():
         'buckets': buckets,
         't0': t0,
         'routers': out,
-        'ssids': {
-            'names': [name for name, _ in ranked],
-            'series': {name: pts for name, pts in ranked},
-            'peak': ssid_peak,
-            # The real fleet total, for the tooltip only.
-            'peak_total': max(ssid_totals) if ssid_totals else 0,
-        },
+    })
+
+
+@app.route('/api/ssid-clients')
+@login_required
+def api_ssid_clients():
+    """Fleet-wide associated-client count per SSID, summed over every router.
+
+    Its own endpoint rather than a block on /api/bandwidth because it runs on
+    its own, finer bucket (`ssid_interval`, default 120s vs the bandwidth
+    graphs' 360s). Sharing the response would force the browser to re-fetch —
+    and re-serialise — every router's sparkline three times per bandwidth
+    bucket, which is exactly what §14 removed.
+
+    Returns one fixed-length array per SSID indexed by bucket, `null` for
+    buckets with no row (renders as a gap, not a zero). Zero-client SSIDs are
+    stored as real zeros by the collector, so a gap here means no router
+    reported at all, not a quiet network.
+    """
+    config = load_config()
+    interval = max(30, int(config.get('ssid_interval', SSID_BUCKET_DEFAULT)))
+    hours = max(1, int(config.get('bandwidth_window_hours',
+                                  BANDWIDTH_WINDOW_HOURS_DEFAULT)))
+    buckets = max(1, (hours * 3600) // interval)
+
+    # Aligned to a bucket boundary, as /api/bandwidth is, so the collector's
+    # wall-clock-aligned buckets land on exact indices.
+    now_bucket = int(time.time()) // interval * interval
+    t0 = now_bucket - (buckets - 1) * interval
+
+    conn = get_db()
+    cur = conn.cursor()
+    series = {}
+    totals = [0] * buckets
+    # No ORDER BY: rows are placed by computed index, not read order, and
+    # asking for one makes SQLite build a temp b-tree on top of a scan that
+    # idx_ssid_hist_ts_ssid already streams in order.
+    cur.execute(
+        "SELECT ts, ssid, SUM(clients) AS n FROM ssid_history "
+        "WHERE ts >= ? GROUP BY ts, ssid",
+        (t0,),
+    )
+    for row in cur.fetchall():
+        idx = (row['ts'] - t0) // interval
+        if not (0 <= idx < buckets):
+            continue
+        pts = series.get(row['ssid'])
+        if pts is None:
+            pts = series[row['ssid']] = [None] * buckets
+        pts[idx] = row['n']
+        totals[idx] += row['n']
+    conn.close()
+
+    # Ranked by peak so the cap keeps the networks that matter; the dashboard
+    # then sorts by name for a stable colour assignment (§16).
+    ranked = sorted(
+        series.items(),
+        key=lambda kv: max((v for v in kv[1] if v is not None), default=0),
+        reverse=True,
+    )[:SSID_SERIES_MAX]
+    # Peak of what is actually DRAWN: the series are overlaid, not stacked, so
+    # that is the largest single SSID. `peak_total` is the real fleet total,
+    # for the tooltip and the axis note only.
+    peak = max((v for _, pts in ranked for v in pts if v is not None), default=0)
+
+    return jsonify({
+        'success': True,
+        'window_hours': hours,
+        'interval': interval,
+        'buckets': buckets,
+        't0': t0,
+        'names': [name for name, _ in ranked],
+        'series': dict(ranked),
+        'peak': peak,
+        'peak_total': max(totals) if totals else 0,
     })
 
 

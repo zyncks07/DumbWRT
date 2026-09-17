@@ -855,55 +855,90 @@ Two small integers per existing row. Row count unchanged.
 - **The expanded router detail still has no large version of either graph** — carried over
   from §13/§14.
 
+
 ---
 
-## 16. Feature Pass — 2026-09-17 (fleet clients-by-SSID graph in the stats strip)
+## 16. Feature Pass — 2026-09-17 (fleet clients-by-SSID card)
 
-Fills the dead space to the right of the stats-strip pills with a **24 h
-clients-by-SSID** graph: one overlaid series per SSID, fleet-wide (summed over
-every router), on the same buckets, same window and same overlay design as the
-per-router client graph (§15). The fleet runs three SSIDs — `LASKIE Hotspot`,
-`Juvilaskie`, `LASKIE No Restriction`.
+A full-width card under the stats strip showing **24 h of associated clients per
+SSID**, fleet-wide (summed over every router): one overlaid series per SSID, on
+the same overlay design as the per-router client graph (§15), with a y-scale and
+a time axis. The fleet runs three SSIDs — `LASKIE Hotspot`, `Juvilaskie`,
+`LASKIE No Restriction`.
+
+> It shipped earlier the same day as a panel *inside* the stats strip, filling
+> the dead space right of the pills. At strip height that was a ~46 px ribbon
+> across 24 h — too flat to read a shape from. It is now its own card at ~240 px
+> (≈4× the strip), which is also what earns it the axis. The data model below is
+> unchanged from that first cut; the bucket length and the endpoint are not.
 
 ### Why a new table and not more columns on `bandwidth_history`
 
-Every prior client series rode `bandwidth_history` (§14, §15) because each was a
-fixed extra column. **An SSID set is a variable-width dimension**, so columns
-would mean either one column per SSID — renaming an SSID becomes a migration —
-or a JSON blob the API has to parse per row. `ssid_history` is instead one row
-per `(bucket, router, ssid)`.
+Every prior client series (§14 total, §15 band split) rode that table because
+each was a fixed extra column. **An SSID set is a variable-width dimension**, so
+columns would mean either one column per SSID — renaming an SSID becomes a
+migration — or a JSON blob the API has to parse per row. `ssid_history` is
+instead one row per `(bucket, router, ssid)`.
 
-It still **rides `bandwidth_history`'s bucket boundaries, 24 h window and
-self-cleaning-on-write retention**, so `/api/bandwidth` indexes both with the
-same arithmetic and neither waits on the daily retention pass. Collection is
-free: `poll_once()` already walks every interface and already has
-`info['ssid']`, so the split is one dict in a loop that already runs — **zero
-new SSH work, zero new queries, and the graph ships in the `/api/bandwidth`
-response the dashboard already fetches once per bucket.**
+Collection is still free: `poll_once()` already walks every interface and
+already has `info['ssid']`, so the split is one dict in a loop that already
+runs — **zero new SSH work.**
 
-### Stored per-router even though the graph is fleet-wide
+### GOTCHA: this table does NOT share `bandwidth_interval`
 
-That is where the data is produced: each router task owns its own accumulator
-and flushes independently on its own rollover. The API does the fleet sum
-(`SUM(clients) GROUP BY ts, ssid`). Storing a pre-summed fleet row would need a
-new aggregator loop that waits on all N routers — the one thing the
-per-router-task design avoids.
+It has its own `ssid_interval` (default **120 s**, 720 points over 24 h) where
+the per-router graphs stay at 360 s. The card is ~1900 px wide; the per-router
+sparklines are ~270 px columns. Raising `bandwidth_interval` to get this
+resolution would triple **every router's** row count and SVG path length for
+columns far too narrow to show the difference — exactly the trade §14 made in
+the other direction. Resolution follows the pixels available, so the two
+budgets are separate.
 
-Value is the **mean over the polls in the bucket**, on the same `acc_cli_n`
-divisor as `clients`/`clients_24`/`clients_5` — a client count is a gauge.
+That is also why the fleet series got **its own endpoint**,
+`GET /api/ssid-clients`, instead of staying a block on `/api/bandwidth`: at
+120 s vs 360 s, one shared response would either stale the card by two buckets
+or re-serialise every router's sparkline three times per bandwidth bucket —
+the thing §14 removed. Each has its own self-chaining timer at the interval its
+own API reports.
+
+### GOTCHA: rows carry the `interval` they were written at
+
+`save_ssid_bucket()` deletes rows whose `interval` differs from the current one
+(NULL, i.e. pre-migration, counts as stale) in the same statement as the window
+trim. Without it, changing `ssid_interval` leaves up to 24 h of mixed-resolution
+history, and a coarser row only fills one of every N finer slots — the graph
+renders as a comb. Clearing is the right answer: a resolution change invalidates
+the old series shape anyway, and it refills within one window. Verified live on
+the 360 s → 120 s change: NULL-interval rows dropped per router as each wrote
+its first 120 s bucket.
 
 ### GOTCHA: zero-client SSIDs are stored, deliberately
 
 A configured-but-empty SSID writes `clients = 0`, not nothing. Dropping those
-rows would make an all-quiet bucket indistinguishable from an offline one —
-the fleet sum would simply have no row and the bucket would render as a gap
-instead of a zero. It costs 8 routers × 3 SSIDs = 23 rows/bucket today (one AP
-has only 2 SSIDs), ~5.5k rows over 24 h; ~21.6k (~1 MB) at 30 routers.
-Immaterial against the 420 MB budget. **Don't "optimise" the zeros away.**
+rows would make an all-quiet bucket indistinguishable from an offline one — the
+fleet sum would have no row and the bucket would render as a gap instead of a
+zero. ~23 rows/bucket today (8 routers × 3 SSIDs, one AP has only 2); ~65k rows
+(~3 MB) over 24 h at 30 routers on the 120 s bucket. Immaterial against the
+420 MB budget. **Don't "optimise" the zeros away.**
 
-A router offline for a whole bucket writes no row at all, so the fleet sum for
-that bucket covers only the APs that reported. That is honest — those clients
-aren't observable — but it means a fleet-wide outage reads as a dip, not a gap.
+A router offline for a whole bucket writes no row, so the fleet sum covers only
+the APs that reported. Honest — those clients aren't observable — but it means a
+fleet-wide outage reads as a dip, not a gap.
+
+### Stored per-router even though the graph is fleet-wide
+
+That is where the data is produced: each router task owns its accumulator and
+flushes on its own rollover. The API does the fleet sum
+(`SUM(clients) GROUP BY ts, ssid`). A pre-summed fleet row would need a new
+aggregator loop waiting on all N routers — the thing the per-router-task design
+avoids. Value is the **mean over the polls in the bucket**, on its own
+`acc_ssid_n` divisor (the SSID bucket no longer shares `acc_cli_n`, since the
+two roll over on different boundaries).
+
+`idx_ssid_hist_ts_ssid (ts, ssid)` replaces the old `(ts)` index so that
+`GROUP BY ts, ssid` streams instead of sorting ~65k rows; the query carries **no
+`ORDER BY`** (rows are placed by computed index, and asking for one puts a temp
+b-tree back on top of an already-ordered scan).
 
 ### GOTCHA: colour is assigned ALPHABETICALLY, not by traffic
 
@@ -911,90 +946,109 @@ aren't observable — but it means a fleet-wide outage reads as a dip, not a gap
 place the app deliberately does **not** rank by size:
 
 - An ops console is watched daily, so "LASKIE Hotspot is the violet one" has to
-  hold across reloads. Ranking by clients reshuffles the colours the moment two
+  hold across reloads. Ranking by clients reshuffles colours the moment two
   networks trade places.
 - The two feeds don't agree on an order at the same instant anyway —
-  `/api/stats` is live, `/api/bandwidth` ranks by 24 h peak — so whichever
-  landed first would decide the colours. That race produced a visibly different
-  legend on consecutive page loads before the sort went in.
+  `/api/stats` is live, `/api/ssid-clients` ranks by 24 h peak — so whichever
+  landed first would decide. That race produced a visibly different legend on
+  consecutive page loads before the sort went in.
 
-Sorting by name is the only rule that gives the same answer in every browser on
-every load. The cost is that the busiest SSID doesn't necessarily get `--s1`.
 The API still ranks by peak, but only to pick *which* SSIDs survive
-`SSID_SERIES_MAX` (4) — ranking for the cap, sorting for the colours; keep those
-two separate.
+`SSID_SERIES_MAX` (4). Ranking for the cap, sorting for the colours — keep those
+separate.
 
-### GOTCHA: `ssids.peak` is the peak of what is DRAWN
+### GOTCHA: `peak` is the peak of what is DRAWN
 
 Same rule as §15's `peak_clients`: the series are overlaid, not stacked, so the
 y-scale is the **largest single SSID**, not the fleet total — scaling to a total
 nothing draws would waste most of the height. `peak_total` is the real fleet
-total, tooltip-only. Don't collapse them.
+total, shown as text beside the legend. Don't collapse them.
+
+### GOTCHA: gridlines are HTML behind the SVG, and the SVG has no background
+
+The plot ground is painted by `.ssid-grid`, which is an **earlier sibling** of
+the `<svg>` and therefore behind it; `.ssid-spark` is `background: transparent`.
+Giving the SVG its own background (as the first cut did) hides every gridline
+under it — they were invisible in the first screenshot pass.
+
+They are HTML, not SVG lines, because the SVG is `preserveAspectRatio="none"`:
+any `<text>` inside would be stretched horizontally with the paths. The y labels
+live in a 34 px gutter reserved by `.ssid-plot`'s `padding-left`, which
+`.ssid-grid`'s `inset: 0 0 0 34px` matches exactly.
+
+`niceStep()` uses the classic **1.5 / 3 / 7 midpoints**, not 1/2/5: rounding at
+the value itself always rounds up, so a max of 27 over 4 lines jumps to a step
+of 10 and draws two gridlines instead of five.
 
 ### Colours: a categorical ramp, kept off the status hues
 
-`static/theme.css` gains `--s1..--s4` (cyan / violet / magenta / amber-brown),
-light-mode variants darkened for contrast against the light ground — the
-dark-mode values wash out at 0.2 fill opacity on white.
+`static/theme.css` has `--s1..--s4` (cyan / violet / magenta / amber-brown),
+light-mode variants darkened for contrast — the dark values wash out at 0.2 fill
+opacity on white.
 
 They deliberately avoid green / amber / red: §6 reserves those for
-online / degraded / offline, and a series painted in one would read as a
-verdict when an SSID name carries no good-or-bad meaning. `--s1` equals
-`--accent` by design. Every series is named in the legend beside its swatch —
-§6's "never colour alone", paid once per panel.
+online / degraded / offline, and a series painted in one would read as a verdict
+when an SSID name carries no good-or-bad meaning. `--s1` equals `--accent` by
+design. Every series is named in the legend beside its swatch — §6's "never
+colour alone", paid once per card.
 
 Applied via CSS classes (`.ss-a1`/`.ss-l1`…), **not** `fill=` attributes:
 `var()` is only valid in a declaration, so `fill="var(--s1)"` renders black.
 
 ### The legend count is live, the graph is not
 
-The graph's last point is up to one bucket (6 min) old. The legend number comes
-from a new `clients_by_ssid` map on `/api/stats`, on the same 10 s cadence as
-every other pill in the strip — the same "live number beside a slower graph"
-shape the per-router rows already use.
+The graph's last point is up to one bucket (2 min) old. The legend number comes
+from `clients_by_ssid` on `/api/stats`, on the same 10 s cadence as every pill
+in the strip — the same "live number beside a slower graph" shape the per-router
+rows already use.
+
+### Config keys
+
+| Key | Default | Effect |
+|---|---|---|
+| `ssid_interval` | 120 | SSID bucket length in seconds (720 points over 24 h). Re-read on the topology cadence (300 s), so a change applies without a collector restart — and clears the table, see above. |
+| `bandwidth_window_hours` | 24 | Shared with the bandwidth graphs; also this table's retention window. |
 
 ### Code map
 
-- **`ubus_collector.py`** — `ssid_history` table + two indexes in `init_db()`.
-  `poll_once()` returns `ssid_counts` (summed over this router's bands: one
-  SSID is normally a 2.4G and a 5G interface, and the graph tracks the network,
-  not the radio). `run_router()` keeps `acc_ssid_sum` beside the other
-  accumulators and flushes via `save_ssid_bucket()` on the same rollover —
-  which since §14 lives at the top level of the successful-poll path, not
-  inside the bandwidth branch. `save_ssid_bucket()` is `executemany` + the same
-  self-cleaning `DELETE`.
-- **`flask_app.py`** — `SSID_SERIES_MAX = 4`. `/api/bandwidth` gains a
-  top-level `ssids` block (`names`, `series`, `peak`, `peak_total`).
-  `/api/stats` gains `clients_by_ssid`.
-- **`retention.py`** — `BANDWIDTH_TABLE` became `BUCKET_TABLES =
-  ("bandwidth_history", "ssid_history")`; both are unix-int `ts` on the
-  bandwidth window, both get the safety-net cutoff and both are row-counted for
-  the Maintenance page.
+- **`ubus_collector.py`** — `SSID_BUCKET_DEFAULT = 120`. `ssid_history` table
+  (+ `interval` column via the §9 try/except ALTER loop) and its two indexes.
+  `poll_once()` returns `ssid_counts`, summed over this router's bands: one SSID
+  is normally a 2.4G and a 5G interface, and the graph tracks the network, not
+  the radio. `run_router()` keeps a **separate** `ssid_bucket_start` /
+  `acc_ssid_sum` / `acc_ssid_n` beside the bandwidth accumulator, rolling over
+  on its own boundary. `save_ssid_bucket()` is `executemany` + the
+  window-and-interval DELETE.
+- **`flask_app.py`** — `SSID_SERIES_MAX = 4`, `SSID_BUCKET_DEFAULT = 120`,
+  `GET /api/ssid-clients`. `/api/stats` gains `clients_by_ssid`.
+- **`retention.py`** — `BUCKET_TABLES = ("bandwidth_history", "ssid_history")`;
+  both are unix-int `ts` on the bandwidth window, both get the safety-net cutoff
+  and both are row-counted for the Maintenance page.
 - **`static/theme.css`** — `--s1..--s4` in both palettes.
-- **`templates/dashboard.html`** — `.ssid-panel` (`margin-left:auto`, so it
-  takes whatever the fixed-width pills leave over), `.ssid-legend`,
-  `.ssid-graph` (46 px). `renderSsidGraph()` / `renderSsidLegend()` /
-  `ssidTrack()`. **`sparkOverlay()` is reused unchanged** — it was already
-  generic over series count and CSS class.
-  - **46 px, not the rows' 38 px.** This graph is ~1250 px wide at 1080p
-    against a router row's ~270 px, so the binding constraint is vertical: at
-    240 buckets it already has ~5 px per point horizontally and only ~3 px per
-    client vertically.
+- **`templates/dashboard.html`** — `.ssid-card` / `.ssid-head` / `.ssid-legend`
+  / `.ssid-plot` (200 px) / `.ssid-grid` / `.ssid-xaxis`. `renderSsidGraph()`,
+  `renderSsidLegend()`, `ssidTrack()`, `niceStep()`, `fetchSsidClients()`.
+  **`sparkOverlay()` is reused unchanged** — it was already generic over series
+  count, CSS class and height. `SSID_PLOT_H` must stay equal to `.ssid-plot`'s
+  CSS height: the SVG is `preserveAspectRatio="none"`, so a mismatch silently
+  scales y against x.
 - **`templates/maintenance.html`** — `ssid_history` row count + the retention note.
 
 ### Migration behaviour
 
-The table starts empty, so the panel shows "no data yet" until the first bucket
-rollover (≤ 6 min), then fills from the right over 24 h. Self-healing; no
-backfill, same as §14/§15.
+The table clears itself on the interval change, so the card shows "no data yet"
+until the first 120 s rollover (≤ 2 min), then fills from the right over 24 h.
+Self-healing; no backfill, same as §14/§15.
 
 ### Open territory
 
 - **The fleet-total client sparkline** (§14/§15 open territory) is still
-  unwritten. It is now a `SUM(clients) GROUP BY ts` over `ssid_history` — or
-  just the sum of the series already in the `ssids` block, browser-side.
+  unwritten. It is now just the sum of the series already in the
+  `/api/ssid-clients` response, browser-side.
 - **Four series is the cap** (`SSID_SERIES_MAX`, and `--s1..--s4`). Past that
-  the overlay technique needs a different form — same limit §15 hit at three.
+  the overlay technique needs a different form — the same limit §15 hit at three.
+- **No hover readout.** At 720 points the card has the resolution for one, but
+  it would be the first mousemove handler on the dashboard (§6, Atom CPU).
 - **No per-SSID bandwidth**, only client counts: the uplink is a single
   aggregate and the per-SSID wireless counters are the inflated ones (§13).
 - **An SSID renamed on the routers** appears as a new series; the old name ages
