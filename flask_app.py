@@ -437,6 +437,19 @@ SSID_SERIES_MAX = 4
 # per-router sparkline columns. Its own key, not bandwidth_interval — see the
 # collector's SSID_BUCKET_DEFAULT.
 SSID_BUCKET_DEFAULT = 120
+# The SSID card's range picker (§17). The fleet series is kept for a month;
+# a range is drawn at about one point per SSID_PX_PER_POINT pixels of plot,
+# on the smallest step from SSID_STEPS that fits — so 24 h on a 1830 px
+# plot is the full 120s resolution (720 points) and 30 days is hourly (720).
+# Steps are whole minutes/hours so buckets fall on local clock boundaries,
+# and every step >= SSID_ROLLUP_SECONDS is a multiple of it so those ranges
+# can read the 10-minute tier instead of 5x as many 120s rows.
+SSID_KEEP_DAYS_DEFAULT = 31
+SSID_ROLLUP_SECONDS = 600          # must match the collector's constant
+SSID_STEPS = (120, 180, 240, 300, 360, 480, 600, 1200, 1800, 2400, 3600,
+              7200, 10800, 21600)
+SSID_PX_PER_POINT = 2.4
+SSID_MIN_SPAN = 3600
 
 
 @app.route('/api/bandwidth')
@@ -543,52 +556,105 @@ def api_bandwidth():
 @app.route('/api/ssid-clients')
 @login_required
 def api_ssid_clients():
-    """Fleet-wide associated-client count per SSID, summed over every router.
+    """Fleet-wide associated-client count per SSID, for any range inside the
+    retained month (§17).
 
-    Its own endpoint rather than a block on /api/bandwidth because it runs on
-    its own, finer bucket (`ssid_interval`, default 120s vs the bandwidth
-    graphs' 360s). Sharing the response would force the browser to re-fetch —
-    and re-serialise — every router's sparkline three times per bandwidth
-    bucket, which is exactly what §14 removed.
+    Query: either `span` (seconds, a live range ending now — the presets), or
+    `start` + `end` (unix seconds — the calendar; an `end` in the future is
+    clamped to now and the range is live). `px` is the plot width, which
+    sets the point budget. No parameters = the last 24 h, as before §17.
 
     Returns one fixed-length array per SSID indexed by bucket, `null` for
-    buckets with no row (renders as a gap, not a zero). Zero-client SSIDs are
-    stored as real zeros by the collector, so a gap here means no router
-    reported at all, not a quiet network.
+    buckets with no row (renders as a gap, not a zero). Each value is the
+    mean of the 120s fleet sums inside that bucket; when the step is coarser
+    than the stored interval, `max` carries the busiest 120s value per bucket
+    too. Zero-client SSIDs are stored as real zeros by the collector, so a gap
+    means no router reported at all, not a quiet network.
+
+    `refresh` is the number of seconds until the next fetch is worth making —
+    computed here, on the server clock, so a live range is re-read 30 s after
+    a bucket boundary (every router has flushed by then) rather than at an
+    arbitrary browser-timed offset that could catch a half-summed bucket. It
+    is null for a range that has ended: its data can no longer change.
     """
     config = load_config()
     interval = max(30, int(config.get('ssid_interval', SSID_BUCKET_DEFAULT)))
-    hours = max(1, int(config.get('bandwidth_window_hours',
-                                  BANDWIDTH_WINDOW_HOURS_DEFAULT)))
-    buckets = max(1, (hours * 3600) // interval)
+    keep_days = max(1, int(config.get('ssid_history_days',
+                                      SSID_KEEP_DAYS_DEFAULT)))
+    now = int(time.time())
+    floor_ts = now - keep_days * 86400
 
-    # Aligned to a bucket boundary, as /api/bandwidth is, so the collector's
-    # wall-clock-aligned buckets land on exact indices.
-    now_bucket = int(time.time()) // interval * interval
-    t0 = now_bucket - (buckets - 1) * interval
+    try:
+        px = int(request.args.get('px', 1830))
+        if 'start' in request.args or 'end' in request.args:
+            start = int(request.args['start'])
+            end = int(request.args.get('end', now))
+        else:
+            end = now
+            start = now - int(request.args.get('span', 86400))
+    except (KeyError, ValueError):
+        return jsonify({'success': False, 'error': 'bad range'}), 400
+    px = max(200, min(px, 4000))
+    end = min(end, now)
+    start = max(start, floor_ts)
+    if end - start < SSID_MIN_SPAN:
+        start = max(floor_ts, end - SSID_MIN_SPAN)
+        end = start + SSID_MIN_SPAN
+    span = end - start
+    live = end >= now - interval
+
+    # Smallest step that keeps the point count inside the pixel budget. Only
+    # multiples of the stored interval qualify: anything else would bin a
+    # varying number of rows per bucket and draw a beat pattern.
+    target = max(60, int(px / SSID_PX_PER_POINT))
+    steps = [interval] + [st for st in SSID_STEPS
+                          if st > interval and st % interval == 0]
+    step = next((st for st in steps if -(-span // st) <= target), steps[-1])
+    use_rollup = step % SSID_ROLLUP_SECONDS == 0
+
+    # Aligned to the step, not to `start`: the bucket grid then stays put as a
+    # live window slides, instead of re-binning and shimmering every refresh.
+    t0 = start // step * step
+    buckets = max(1, -(-(end - t0) // step))
+    t_end = t0 + buckets * step
 
     conn = get_db()
     cur = conn.cursor()
-    series = {}
-    totals = [0] * buckets
-    # No ORDER BY: rows are placed by computed index, not read order, and
-    # asking for one makes SQLite build a temp b-tree on top of a scan that
-    # idx_ssid_hist_ts_ssid already streams in order.
-    cur.execute(
-        "SELECT ts, ssid, SUM(clients) AS n FROM ssid_history "
-        "WHERE ts >= ? GROUP BY ts, ssid",
-        (t0,),
-    )
-    for row in cur.fetchall():
-        idx = (row['ts'] - t0) // interval
+    if use_rollup:
+        cur.execute(
+            "SELECT (ts - ?) / ? AS i, ssid, SUM(sum) * 1.0 / SUM(n) AS v, "
+            "MAX(max) AS mx FROM ssid_fleet_rollup "
+            "WHERE ts >= ? AND ts < ? GROUP BY i, ssid",
+            (t0, step, t0, t_end),
+        )
+    else:
+        cur.execute(
+            "SELECT (ts - ?) / ? AS i, ssid, AVG(clients) AS v, "
+            "MAX(clients) AS mx FROM ssid_fleet_history "
+            "WHERE ts >= ? AND ts < ? GROUP BY i, ssid",
+            (t0, step, t0, t_end),
+        )
+    rows = cur.fetchall()
+    oldest = cur.execute(
+        "SELECT ts FROM ssid_fleet_history ORDER BY ts LIMIT 1").fetchone()
+    conn.close()
+
+    binned = step > interval
+    series, peaks = {}, {}
+    totals = [0.0] * buckets
+    for row in rows:
+        idx = row['i']
         if not (0 <= idx < buckets):
             continue
-        pts = series.get(row['ssid'])
+        name = row['ssid']
+        pts = series.get(name)
         if pts is None:
-            pts = series[row['ssid']] = [None] * buckets
-        pts[idx] = row['n']
-        totals[idx] += row['n']
-    conn.close()
+            pts = series[name] = [None] * buckets
+            peaks[name] = [None] * buckets
+        v = round(row['v'], 1)
+        pts[idx] = int(v) if v == int(v) else v
+        peaks[name][idx] = row['mx']
+        totals[idx] += v
 
     # Ranked by peak so the cap keeps the networks that matter; the dashboard
     # then sorts by name for a stable colour assignment (§16).
@@ -602,16 +668,29 @@ def api_ssid_clients():
     # for the tooltip and the axis note only.
     peak = max((v for _, pts in ranked for v in pts if v is not None), default=0)
 
+    refresh = None
+    if live:
+        period = max(interval, min(step, SSID_ROLLUP_SECONDS))
+        refresh = (now // period + 1) * period + 30 - now
+
     return jsonify({
         'success': True,
-        'window_hours': hours,
         'interval': interval,
+        'step': step,
+        'tier': 'rollup' if use_rollup else 'full',
         'buckets': buckets,
         't0': t0,
+        'start': start,
+        'end': end,
+        'live': live,
+        'refresh': refresh,
+        'keep_days': keep_days,
+        'oldest': oldest['ts'] if oldest else None,
         'names': [name for name, _ in ranked],
         'series': dict(ranked),
+        'max': {name: peaks[name] for name, _ in ranked} if binned else None,
         'peak': peak,
-        'peak_total': max(totals) if totals else 0,
+        'peak_total': round(max(totals), 1) if totals else 0,
     })
 
 

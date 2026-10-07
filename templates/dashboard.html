@@ -177,6 +177,152 @@
             white-space: nowrap;
         }
 
+        /* ---- range picker (§17) ----
+           Presets are rolling windows ending now; the calendar picks whole
+           local days inside the retained month. No transitions anywhere:
+           these are controls, but they repaint the graph, and §6 keeps data
+           updates instant. */
+        .ssid-range {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            position: relative;
+        }
+        .ssid-presets {
+            display: inline-flex;
+            border: 1px solid var(--border-b);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .ssid-presets button,
+        .ssid-cal-btn {
+            background: transparent;
+            border: 0;
+            color: var(--fg-muted);
+            font: inherit;
+            font-size: 10.5px;
+            line-height: 1;
+            padding: 4px 8px;
+            cursor: pointer;
+            font-variant-numeric: tabular-nums;
+        }
+        .ssid-presets button + button { border-left: 1px solid var(--border-c); }
+        .ssid-presets button:hover,
+        .ssid-cal-btn:hover { color: var(--fg); background: var(--border-c); }
+        .ssid-presets button.on {
+            background: var(--accent);
+            color: var(--bg-0);
+            font-weight: 600;
+        }
+        .ssid-cal-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            border: 1px solid var(--border-b);
+            border-radius: 6px;
+            white-space: nowrap;
+        }
+        .ssid-cal-btn.on {
+            border-color: var(--accent);
+            color: var(--fg);
+            font-weight: 600;
+        }
+        .ssid-cal {
+            position: absolute;
+            top: calc(100% + 6px);
+            left: 0;
+            z-index: 20;
+            width: 252px;
+            /* --card-bg is translucent; layered over the opaque page colour
+               so the graph doesn't show through the day grid. */
+            background: linear-gradient(var(--card-bg), var(--card-bg)), var(--bg-1);
+            border: 1px solid var(--border-b);
+            border-radius: 8px;
+            padding: 10px;
+            box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+            font-size: 11px;
+            line-height: 1.2;
+        }
+        .ssid-cal[hidden] { display: none; }
+        .cal-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 8px;
+            color: var(--fg);
+            font-weight: 600;
+        }
+        .cal-head span:last-child {
+            color: var(--fg-muted);
+            font-weight: 400;
+            font-size: 9.5px;
+        }
+        .cal-grid {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 2px 0;
+        }
+        .cal-dow {
+            color: var(--fg-muted);
+            font-size: 9px;
+            text-align: center;
+            padding-bottom: 3px;
+        }
+        .cal-d {
+            position: relative;
+            height: 30px;
+            background: transparent;
+            border: 0;
+            color: var(--fg);
+            font: inherit;
+            font-variant-numeric: tabular-nums;
+            cursor: pointer;
+            padding: 0;
+        }
+        .cal-d .m {
+            position: absolute;
+            top: 1px;
+            left: 0;
+            right: 0;
+            font-size: 7.5px;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }
+        .cal-d:disabled { color: var(--fg-muted); opacity: 0.35; cursor: default; }
+        .cal-d.today { box-shadow: inset 0 -2px 0 var(--accent); }
+        .cal-d:not(:disabled):hover { background: var(--border-c); }
+        /* The run between the two ends is a band; the ends are solid. */
+        .cal-d.in { background: var(--border-a); }
+        .cal-d.end {
+            background: var(--accent);
+            color: var(--bg-0);
+            font-weight: 600;
+            border-radius: 4px;
+        }
+        .cal-d.end .m { color: var(--bg-0); }
+        .cal-foot {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border-c);
+            color: var(--fg-muted);
+            font-size: 10px;
+        }
+        .cal-foot button {
+            background: transparent;
+            border: 1px solid var(--border-b);
+            border-radius: 5px;
+            color: var(--fg);
+            font: inherit;
+            padding: 3px 8px;
+            cursor: pointer;
+        }
+        .cal-foot button:hover { background: var(--border-c); }
+
         /* Plot area. The gridlines are absolutely-positioned HTML rather than
            SVG lines because the SVG uses preserveAspectRatio="none" — text
            inside it would be stretched horizontally along with the paths. */
@@ -219,12 +365,39 @@
             font-size: 9px;
             font-variant-numeric: tabular-nums;
         }
+        /* Ticks are placed by time, not spread evenly: a range can start
+           mid-day, and the labels have to sit on real clock boundaries. */
         .ssid-xaxis {
-            display: flex;
-            justify-content: space-between;
+            position: relative;
+            height: 11px;
             margin: 3px 0 0 34px;
             color: var(--fg-muted);
             font-size: 9px;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        .ssid-xaxis span {
+            position: absolute;
+            top: 0;
+            transform: translateX(-50%);
+        }
+        .ssid-xaxis span.day { color: var(--fg); }
+        .ssid-xaxis span.now { right: 0; transform: none; }
+        /* Vertical guide at each tick; solid-ish at midnight so a multi-day
+           range reads as days. */
+        .ssid-vl {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 0;
+            border-left: 1px dashed var(--border-c);
+        }
+        .ssid-vl.day { border-left: 1px solid var(--border-a); }
+        .ssid-tip-r .mx {
+            color: var(--fg-muted);
+            font-size: 9.5px;
+            min-width: 40px;
+            text-align: right;
             font-variant-numeric: tabular-nums;
         }
         /* ---- hover readout ----
@@ -248,7 +421,7 @@
             position: absolute;
             top: 6px;
             z-index: 3;
-            background: var(--card-bg);
+            background: linear-gradient(var(--card-bg), var(--card-bg)), var(--bg-1);
             border: 1px solid var(--border-b);
             border-radius: 6px;
             padding: 6px 9px;
@@ -861,7 +1034,22 @@
 
     <div class="ssid-card" id="ssidCard">
         <div class="ssid-head">
-            <span class="ssid-title">Clients by SSID · 24h</span>
+            <span class="ssid-title">Clients by SSID</span>
+            <span class="ssid-range">
+                <span class="ssid-presets" id="ssidPresets" role="group" aria-label="Graph range">
+                    <button type="button" data-span="86400">24h</button>
+                    <button type="button" data-span="172800">2d</button>
+                    <button type="button" data-span="259200">3d</button>
+                    <button type="button" data-span="604800">7d</button>
+                    <button type="button" data-span="1209600">14d</button>
+                    <button type="button" data-span="2592000">30d</button>
+                </span>
+                <button type="button" class="ssid-cal-btn" id="ssidCalBtn"
+                        aria-haspopup="dialog" aria-expanded="false" aria-controls="ssidCal">
+                    <i class="far fa-calendar"></i><span id="ssidCalLabel">Dates</span>
+                </button>
+                <div class="ssid-cal" id="ssidCal" role="dialog" aria-label="Choose a date range" hidden></div>
+            </span>
             <span class="ssid-legend" id="ssidLegend"></span>
             <span class="ssid-peak" id="ssidPeak"></span>
         </div>
@@ -938,13 +1126,19 @@
         const SSID_PLOT_H = 200;
         let ssidOrder = [];
         let ssidSeries = {};
+        // Per-bucket busiest 120s value, per SSID — only sent when the step is
+        // coarser than the stored interval (otherwise it equals the mean).
+        let ssidMax = null;
         let ssidBuckets = 0;
         let ssidT0 = 0;
-        let ssidIntervalSec = 120;
-        let ssidWindowHours = 24;
+        let ssidStep = 120;            // seconds per drawn point
+        let ssidIntervalSec = 120;     // seconds per stored point
+        let ssidIsLive = true;         // range ends now (vs a past range)
+        let ssidOldest = null;         // unix ts of the oldest stored bucket
+        let ssidKeepDays = 31;
         let ssidPeak = SSID_MIN_SCALE;
         let ssidPeakTotal = 0;
-        let ssidLive = {};
+        let ssidLive = {};             // live per-SSID counts from /api/stats
 
         // Returns true when the set changed, so only a real change repaints.
         // The API has already capped what it sends to the busiest few; this
@@ -1096,6 +1290,49 @@
             return Math.max(1, (n < 1.5 ? 1 : n < 3 ? 2 : n < 7 ? 5 : 10) * pow);
         }
 
+        // Client counts: whole numbers at full resolution, one decimal once
+        // a point is the mean of several buckets.
+        function fmtCl(v) {
+            if (v == null) return '–';
+            return Number.isInteger(v) ? String(v) : v.toFixed(1);
+        }
+
+        function fmtStep(sec) {
+            return sec < 3600 ? `${Math.round(sec / 60)}-min` : `${Math.round(sec / 3600)}-hour`;
+        }
+
+        // Time-axis ticks on local clock boundaries. The spacing is the
+        // smallest that leaves ~80px per label, so the axis reads "06:00
+        // 12:00 18:00" over a day and "Oct 3  Oct 5  Oct 7" over a month.
+        // Walked with Date setters rather than by adding seconds, so a tick
+        // lands on a local midnight even across a DST change.
+        const SSID_TICK_HOURS = [1, 2, 3, 6, 12, 24, 48, 72, 168];
+        function ssidTicks(t0, t1, widthPx) {
+            if (!(t1 > t0) || !(widthPx > 0)) return [];
+            const spanH = (t1 - t0) / 3600;
+            const room = Math.max(2, Math.floor(widthPx / 80));
+            const th = SSID_TICK_HOURS.find(h => spanH / h <= room) || 168;
+            const dt = new Date(t0 * 1000);
+            dt.setHours(0, 0, 0, 0);
+            const out = [];
+            // Past the right edge only a "now" label sits there (live), so
+            // keep clear of it; otherwise just keep labels off the edges.
+            const xMax = ssidIsLive ? 95 : 98;
+            for (let guard = 0; guard < 1000 && dt.getTime() < t1 * 1000; guard++) {
+                const ts = dt.getTime() / 1000;
+                const x = (ts - t0) / (t1 - t0) * 100;
+                const day = dt.getHours() === 0;
+                if (x >= 2 && x <= xMax) {
+                    out.push({x: x, day: day, label: day
+                        ? dt.toLocaleDateString([], {month: 'short', day: 'numeric'})
+                        : dt.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})});
+                }
+                if (th < 24) dt.setHours(dt.getHours() + th);
+                else dt.setDate(dt.getDate() + th / 24);
+            }
+            return out;
+        }
+
         // The fleet graph: one overlaid series per SSID, on the same shared
         // linear scale, drawn by the same sparkOverlay as the per-router
         // client graph. Shared scale is the whole point — the question is
@@ -1116,7 +1353,8 @@
             const names = ssidOrder.filter(n => (ssidSeries[n] || []).some(v => v != null));
             const old = plot.querySelector('.ssid-spark, .ssid-empty');
             if (!names.length || !ssidBuckets) {
-                if (old) old.outerHTML = '<div class="ssid-empty">no data yet</div>';
+                const msg = ssidOldest == null ? 'no data yet' : 'no data in this range';
+                if (old) old.outerHTML = `<div class="ssid-empty">${msg}</div>`;
                 if (grid) grid.innerHTML = '';
                 if (xax) xax.innerHTML = '';
                 if (pk) pk.textContent = '';
@@ -1126,7 +1364,9 @@
                 return;
             }
 
-            const max = Math.max(ssidPeak, SSID_MIN_SCALE);
+            // Ceiled: a binned range's peak is a mean (17.3), and the top
+            // gridline wants to be a whole client count.
+            const max = Math.max(Math.ceil(ssidPeak), SSID_MIN_SCALE);
             const svg = sparkOverlay(
                 names.map(n => {
                     const i = ssidOrder.indexOf(n) + 1;
@@ -1137,6 +1377,10 @@
             // gridline layer is a sibling and must survive the repaint.
             if (old) old.outerHTML = svg; else plot.insertAdjacentHTML('beforeend', svg);
 
+            // Time ticks first: their vertical guides share the grid layer.
+            const ticks = ssidTicks(ssidT0, ssidT0 + ssidBuckets * ssidStep,
+                                    plot.clientWidth - SSID_GUTTER);
+
             // Gridlines, bottom-up, at whole-client steps. The 0 line is the
             // baseline the areas already sit on, so it is skipped.
             if (grid) {
@@ -1146,31 +1390,31 @@
                     g += `<div class="ssid-gl" style="top:${(100 * (1 - v / max)).toFixed(3)}%">`
                        + `<span>${v}</span></div>`;
                 }
+                ticks.forEach(t => {
+                    g += `<div class="ssid-vl${t.day ? ' day' : ''}" style="left:${t.x.toFixed(3)}%"></div>`;
+                });
                 grid.innerHTML = g;
             }
 
-            // Time axis: one label per 6h, oldest on the left.
             if (xax) {
-                const span = ssidWindowHours;
-                const marks = [];
-                for (let h = span; h > 0; h -= 6) marks.push(`-${h}h`);
-                marks.push('now');
-                xax.innerHTML = marks.map(m => `<span>${m}</span>`).join('');
+                xax.innerHTML = ticks.map(t =>
+                    `<span class="${t.day ? 'day' : ''}" style="left:${t.x.toFixed(3)}%">${t.label}</span>`
+                ).join('') + (ssidIsLive ? '<span class="now">now</span>' : '');
             }
 
             if (pk) {
-                pk.textContent = `peak ${ssidPeakTotal} total`
-                    + ` · ${Math.round(ssidIntervalSec / 60)}-min avg`;
+                pk.textContent = `peak ${fmtCl(ssidPeakTotal)} total`
+                    + ` · ${fmtStep(ssidStep)} avg`;
             }
             // The hover tooltip is the per-bucket readout; the element title
             // stays as the "what am I looking at" summary. Only set when the
             // pointer is away, so the browser can't pop a native tooltip over
             // the custom one.
-            plot.title = `Associated clients per SSID, last ${ssidWindowHours}h`
-                       + ` · ${Math.round(ssidIntervalSec / 60)}-minute average`
+            plot.title = `Associated clients per SSID, ${ssidRangeText()}`
+                       + ` · ${fmtStep(ssidStep)} average`
                        + ` · ${ssidBuckets} points`
                        + ` · scale 0–${max} (busiest single SSID)`
-                       + ` · fleet peak ${ssidPeakTotal}`;
+                       + ` · fleet peak ${fmtCl(ssidPeakTotal)}`;
 
             // A refresh landed under a stationary pointer: the bucket grid
             // shifted by one, so repaint the readout in place rather than
@@ -1224,28 +1468,43 @@
 
             // Age is derived from the server's own bucket grid — the newest
             // bucket is index buckets-1 — so the readout can't be skewed by
-            // the browser clock. Only the wall-clock label uses Date, where
-            // local formatting is the whole point.
-            const ageS = (ssidBuckets - 1 - idx) * ssidIntervalSec;
-            const h = Math.floor(ageS / 3600), m = Math.round((ageS % 3600) / 60);
-            const ago = ageS < 60 ? 'now' : (h ? `${h}h ${m}m ago` : `${m}m ago`);
-            const when = ssidT0
-                ? new Date((ssidT0 + idx * ssidIntervalSec) * 1000)
-                    .toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})
-                : '';
+            // the browser clock. It is only shown for a live range; a past
+            // range is read by its date. The wall-clock label uses Date,
+            // where local formatting is the whole point.
+            const t = ssidT0 + idx * ssidStep;
+            const hm = ts => new Date(ts * 1000)
+                .toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+            let when = new Date(t * 1000)
+                .toLocaleDateString([], {weekday: 'short', month: 'short', day: 'numeric'})
+                + ' ' + hm(t);
+            // A binned point is a span, not an instant: say which.
+            if (ssidStep > ssidIntervalSec) when += '–' + hm(t + ssidStep);
+            let ago = '';
+            if (ssidIsLive) {
+                const ageS = (ssidBuckets - 1 - idx) * ssidStep;
+                const d = Math.floor(ageS / 86400);
+                const h = Math.floor((ageS % 86400) / 3600);
+                const m = Math.round((ageS % 3600) / 60);
+                ago = ageS < 60 ? 'now'
+                    : d ? `${d}d ${h}h ago`
+                    : h ? `${h}h ${m}m ago` : `${m}m ago`;
+            }
 
             let total = 0, any = false, rows = '';
             names.forEach(n => {
                 const v = (ssidSeries[n] || [])[idx];
                 if (v != null) { total += v; any = true; }
+                const mx = ssidMax && ssidMax[n] ? ssidMax[n][idx] : null;
                 rows += `<div class="ssid-tip-r">`
                       + `<i class="ssid-sw c${ssidOrder.indexOf(n) + 1}"></i>`
                       + `<span class="nm">${vEsc(n)}</span>`
-                      + `<b>${v == null ? '–' : v}</b></div>`;
+                      + `<b>${fmtCl(v)}</b>`
+                      + (ssidMax ? `<span class="mx">${mx == null ? '' : 'max ' + mx}</span>` : '')
+                      + `</div>`;
             });
 
             tip.innerHTML = `<div class="ssid-tip-h"><span>${when}</span><span>${ago}</span></div>`
-                          + (any ? rows + `<div class="ssid-tip-t"><span>total</span><b>${total}</b></div>`
+                          + (any ? rows + `<div class="ssid-tip-t"><span>${ssidMax ? 'total (avg)' : 'total'}</span><b>${fmtCl(total)}</b></div>`
                                  : `<div class="ssid-tip-r"><span class="nm">no data</span></div>`);
 
             // Flip to the left of the cursor in the right-hand 40% so the
@@ -1424,23 +1683,259 @@
             }
         }
 
+        // ---- range picker + fetch (§17) ----
+        // `ssidReq` is what the user asked for: {span} for a preset (a live
+        // window the SERVER ends at its own "now"), or {start, end, from,
+        // to} for a calendar pick of whole local days. The server answers
+        // with the step it chose for this plot width and, for a live range,
+        // how long until a refetch is worth making.
+        const SSID_RANGE_KEY = 'ssidRangeSpan';
+        const SSID_PRESETS = [86400, 172800, 259200, 604800, 1209600, 2592000];
+        let ssidReq = {span: 86400};
+        let ssidSeq = 0;               // drops responses a newer pick superseded
+        let ssidTimer = 0;
+        let ssidCalAnchor = null;      // first-clicked day while picking
+
         async function fetchSsidClients() {
+            const seq = ++ssidSeq;
+            clearTimeout(ssidTimer);
+            ssidTimer = 0;
+            const plot = document.getElementById('ssidPlot');
+            // The point budget follows the plot's real width — a narrower
+            // window gets a coarser step, and fewer points to path and hover.
+            const px = plot ? Math.round(plot.clientWidth - SSID_GUTTER) : 0;
+            const q = ssidReq.span ? `span=${ssidReq.span}`
+                                   : `start=${ssidReq.start}&end=${ssidReq.end}`;
+            let retry = 60;
             try {
-                const r = await fetch('/api/ssid-clients');
+                const r = await fetch(`/api/ssid-clients?${q}&px=${px > 0 ? px : 1830}`);
                 const d = await r.json();
-                if (!d.success) return;
-                ssidSeries = d.series || {};
-                ssidBuckets = d.buckets || 0;
-                ssidT0 = d.t0 || 0;
-                ssidIntervalSec = d.interval || ssidIntervalSec;
-                ssidWindowHours = d.window_hours || ssidWindowHours;
-                ssidPeak = d.peak || 0;
-                ssidPeakTotal = d.peak_total || 0;
-                if (ssidTrack(d.names)) renderSsidLegend();
-                renderSsidGraph();
+                if (seq !== ssidSeq) return;
+                if (d.success) {
+                    ssidSeries = d.series || {};
+                    ssidMax = d.max || null;
+                    ssidBuckets = d.buckets || 0;
+                    ssidT0 = d.t0 || 0;
+                    ssidStep = d.step || ssidStep;
+                    ssidIntervalSec = d.interval || ssidIntervalSec;
+                    ssidIsLive = !!d.live;
+                    ssidOldest = d.oldest != null ? d.oldest : null;
+                    ssidKeepDays = d.keep_days || ssidKeepDays;
+                    ssidPeak = d.peak || 0;
+                    ssidPeakTotal = d.peak_total || 0;
+                    if (ssidTrack(d.names)) renderSsidLegend();
+                    renderSsidGraph();
+                    // A finished range can't change: no timer at all.
+                    retry = d.refresh;
+                }
             } catch (e) {
                 console.error('ssid-clients fetch failed', e);
             }
+            if (seq === ssidSeq && retry != null) {
+                ssidTimer = setTimeout(fetchSsidClients, Math.max(15, retry) * 1000);
+            }
+        }
+
+        // Local calendar days as 'YYYY-MM-DD', which also sort as strings.
+        function ymd(dt) {
+            const p = n => String(n).padStart(2, '0');
+            return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`;
+        }
+        function ymdDate(str) {
+            const [y, m, d] = str.split('-').map(Number);
+            return new Date(y, m - 1, d);
+        }
+        function fmtDay(str) {
+            return ymdDate(str).toLocaleDateString([], {month: 'short', day: 'numeric'});
+        }
+        function fmtDayRange(a, b) {
+            const today = ymd(new Date());
+            if (a === b) return a === today ? 'Today' : fmtDay(a);
+            return `${fmtDay(a)} – ${b === today ? 'today' : fmtDay(b)}`;
+        }
+        function presetLabel(span) {
+            return span % 86400 === 0 && span > 86400 ? `${span / 86400}d` : `${span / 3600}h`;
+        }
+        function ssidRangeText() {
+            return ssidReq.span ? `last ${presetLabel(ssidReq.span)}`
+                                : fmtDayRange(ssidReq.from, ssidReq.to);
+        }
+
+        function ssidRangeUi() {
+            document.querySelectorAll('#ssidPresets button').forEach(b => {
+                const on = +b.dataset.span === ssidReq.span;
+                b.classList.toggle('on', on);
+                b.setAttribute('aria-pressed', on ? 'true' : 'false');
+            });
+            const btn = document.getElementById('ssidCalBtn');
+            btn.classList.toggle('on', !ssidReq.span);
+            document.getElementById('ssidCalLabel').textContent =
+                ssidReq.span ? 'Dates' : fmtDayRange(ssidReq.from, ssidReq.to);
+        }
+
+        function setSsidRange(req) {
+            ssidReq = req;
+            ssidRangeUi();
+            if (req.span) {
+                try { localStorage.setItem(SSID_RANGE_KEY, String(req.span)); } catch (e) {}
+            }
+            fetchSsidClients();
+        }
+
+        // One grid of whole weeks covering the retained month, today last —
+        // every selectable day is on screen at once, so there is no month
+        // paging to do. Days before the oldest stored bucket are disabled:
+        // on a fresh install that is most of the month, and saying so beats
+        // drawing an empty graph.
+        function renderSsidCal() {
+            const cal = document.getElementById('ssidCal');
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            const first = new Date(today);
+            first.setDate(first.getDate() - (ssidKeepDays - 1));
+            let oldestDay = null;
+            if (ssidOldest != null) {
+                oldestDay = new Date(ssidOldest * 1000);
+                oldestDay.setHours(0, 0, 0, 0);
+            }
+            const lo = oldestDay && oldestDay > first ? oldestDay : first;
+            const cur = new Date(first);
+            cur.setDate(cur.getDate() - cur.getDay());   // back to Sunday
+            const end = new Date(today);
+            end.setDate(end.getDate() + (6 - end.getDay()));
+
+            const fmtM = dt => dt.toLocaleDateString([], {month: 'short'});
+            let cells = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa']
+                .map(d => `<span class="cal-dow">${d}</span>`).join('');
+            let firstShown = true;
+            for (; cur <= end; cur.setDate(cur.getDate() + 1)) {
+                const key = ymd(cur);
+                const off = cur < lo || cur > today;
+                // Month tag on the 1st and on the first selectable day, so
+                // the grid reads across the month boundary without paging.
+                const tag = (!off && (firstShown || cur.getDate() === 1))
+                    ? `<span class="m">${fmtM(cur)}</span>` : '';
+                if (!off) firstShown = false;
+                const title = cur < first || cur > today ? ''
+                    : off ? ' title="No data recorded yet"' : '';
+                cells += `<button type="button" class="cal-d${+cur === +today ? ' today' : ''}"`
+                       + ` data-d="${key}"${off ? ' disabled' : ''}${title}>${tag}${cur.getDate()}</button>`;
+            }
+            const from = fmtM(first), to = fmtM(today);
+            cal.innerHTML =
+                `<div class="cal-head"><span>${from === to ? from : from + ' – ' + to} ${today.getFullYear()}</span>`
+                + `<span>max ${ssidKeepDays} days</span></div>`
+                + `<div class="cal-grid" id="ssidCalGrid">${cells}</div>`
+                + `<div class="cal-foot"><span id="ssidCalHint"></span>`
+                + `<button type="button" id="ssidCalCancel">Cancel</button></div>`;
+            ssidCalAnchor = null;
+            if (ssidReq.span) paintSsidCal(null, null);
+            else paintSsidCal(ssidReq.from, ssidReq.to);
+            ssidCalHint();
+        }
+
+        function paintSsidCal(a, b) {
+            if (a && b && a > b) [a, b] = [b, a];
+            document.querySelectorAll('#ssidCalGrid .cal-d').forEach(el => {
+                const d = el.dataset.d;
+                const inside = a && d >= a && d <= b;
+                el.classList.toggle('in', !!inside && d !== a && d !== b);
+                el.classList.toggle('end', d === a || d === b);
+            });
+        }
+
+        function ssidCalHint(text) {
+            const el = document.getElementById('ssidCalHint');
+            if (el) el.textContent = text || (ssidCalAnchor
+                ? 'Now pick the last day'
+                : 'Pick the first day');
+        }
+
+        function openSsidCal(open) {
+            const cal = document.getElementById('ssidCal');
+            const btn = document.getElementById('ssidCalBtn');
+            if (open) renderSsidCal();
+            cal.hidden = !open;
+            btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            if (open) {
+                const sel = cal.querySelector('.cal-d.end:not(:disabled)')
+                         || cal.querySelector('.cal-d.today');
+                if (sel) sel.focus();
+            }
+        }
+
+        function initSsidRange() {
+            try {
+                const saved = +localStorage.getItem(SSID_RANGE_KEY);
+                if (SSID_PRESETS.includes(saved)) ssidReq = {span: saved};
+            } catch (e) {}
+            ssidRangeUi();
+
+            document.getElementById('ssidPresets').addEventListener('click', e => {
+                const b = e.target.closest('button[data-span]');
+                if (!b) return;
+                openSsidCal(false);
+                setSsidRange({span: +b.dataset.span});
+            });
+
+            const btn = document.getElementById('ssidCalBtn');
+            const cal = document.getElementById('ssidCal');
+            btn.addEventListener('click', () => openSsidCal(cal.hidden));
+
+            cal.addEventListener('click', e => {
+                if (e.target.closest('#ssidCalCancel')) {
+                    openSsidCal(false);
+                    btn.focus();
+                    return;
+                }
+                const el = e.target.closest('.cal-d');
+                if (!el || el.disabled) return;
+                const d = el.dataset.d;
+                if (!ssidCalAnchor) {
+                    ssidCalAnchor = d;
+                    paintSsidCal(d, d);
+                    ssidCalHint();
+                    return;
+                }
+                let a = ssidCalAnchor, b = d;
+                if (a > b) [a, b] = [b, a];
+                ssidCalAnchor = null;
+                openSsidCal(false);
+                btn.focus();
+                // Whole local days: midnight of the first to midnight after
+                // the last. An end in the future is clamped to now by the
+                // server, which also makes a range ending today live.
+                const endD = ymdDate(b);
+                endD.setDate(endD.getDate() + 1);
+                setSsidRange({
+                    start: Math.floor(ymdDate(a).getTime() / 1000),
+                    end: Math.floor(endD.getTime() / 1000),
+                    from: a, to: b,
+                });
+            });
+            // Preview the run while choosing the second day. At most 42 cells
+            // toggle per move, and only while a pick is half done.
+            cal.addEventListener('mouseover', e => {
+                if (!ssidCalAnchor) return;
+                const el = e.target.closest('.cal-d');
+                if (!el || el.disabled) return;
+                paintSsidCal(ssidCalAnchor, el.dataset.d);
+                const [a, b] = ssidCalAnchor < el.dataset.d
+                    ? [ssidCalAnchor, el.dataset.d] : [el.dataset.d, ssidCalAnchor];
+                const n = Math.round((ymdDate(b) - ymdDate(a)) / 86400000) + 1;
+                ssidCalHint(`${fmtDayRange(a, b)} · ${n} day${n > 1 ? 's' : ''}`);
+            });
+            document.addEventListener('mousedown', e => {
+                if (cal.hidden) return;
+                if (cal.contains(e.target) || btn.contains(e.target)) return;
+                openSsidCal(false);
+            });
+            document.addEventListener('keydown', e => {
+                if (e.key === 'Escape' && !cal.hidden) {
+                    openSsidCal(false);
+                    btn.focus();
+                }
+            });
         }
 
         async function fetchReachability() {
@@ -1946,6 +2441,7 @@
         Promise.all([fetchReachability(), fetchBandwidth()]).then(renderRouters);
         updateStats();
         initSsidHover();
+        initSsidRange();
         fetchSsidClients();
 
         // Auto-refresh every 10 seconds
@@ -1965,15 +2461,11 @@
                 fetchBandwidth().finally(scheduleBandwidth);
             }, Math.max(30, bwIntervalSec) * 1000);
         })();
-        // The SSID graph is on its own, finer bucket, so it gets its own
-        // chain rather than riding the bandwidth one — at 120s vs 360s,
-        // sharing would either stale the SSID card by two buckets or
-        // re-serialise every router's sparkline three times per bucket.
-        (function scheduleSsid() {
-            setTimeout(() => {
-                fetchSsidClients().finally(scheduleSsid);
-            }, Math.max(30, ssidIntervalSec) * 1000);
-        })();
+        // The SSID graph schedules itself: fetchSsidClients() re-arms on the
+        // `refresh` the server returns — 30 s after the next bucket boundary
+        // for a live range, never for a range that has already ended. That
+        // keeps it off the bandwidth chain (different bucket) and off the
+        // browser clock.
     </script>
     <script src="/static/copy-utils.js"></script>
     <script src="/static/theme.js"></script>

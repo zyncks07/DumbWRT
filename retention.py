@@ -29,9 +29,13 @@ HISTORY_TABLES = (
 # save_ssid_bucket) — this is a safety net for rows left behind by a
 # router that stopped reporting. Both are on the bandwidth window.
 BUCKET_TABLES = ("bandwidth_history", "ssid_history")
+# Same unix-int `ts`, but on the month-long SSID window rather than the
+# bandwidth one (§17). save_ssid_bucket() trims these on every write too.
+FLEET_TABLES = ("ssid_fleet_history", "ssid_fleet_rollup")
 
 DEFAULT_RETENTION_DAYS = 1
 DEFAULT_BANDWIDTH_WINDOW_HOURS = 24
+DEFAULT_SSID_KEEP_DAYS = 31
 DEFAULT_RAW_LOG_LINES = 500
 CLEANUP_INTERVAL_SECONDS = 86400  # daily
 
@@ -95,6 +99,12 @@ def run_cleanup(retention_days: int) -> dict:
             bw_cutoff = int(time.time()) - bw_hours * 3600
             for tbl in BUCKET_TABLES:
                 cur.execute(f"DELETE FROM {tbl} WHERE ts < ?", (bw_cutoff,))
+                rows_deleted += cur.rowcount
+            ssid_days = int(_read_config().get(
+                "ssid_history_days", DEFAULT_SSID_KEEP_DAYS))
+            ssid_cutoff = int(time.time()) - ssid_days * 86400
+            for tbl in FLEET_TABLES:
+                cur.execute(f"DELETE FROM {tbl} WHERE ts < ?", (ssid_cutoff,))
                 rows_deleted += cur.rowcount
             conn.commit()
             # VACUUM cannot run inside a transaction.
@@ -174,7 +184,7 @@ def get_history_size() -> dict:
     conn = sqlite3.connect(DB_PATH)
     try:
         cur = conn.cursor()
-        for tbl in HISTORY_TABLES + BUCKET_TABLES:
+        for tbl in HISTORY_TABLES + BUCKET_TABLES + FLEET_TABLES:
             cur.execute(f"SELECT COUNT(*) FROM {tbl}")
             out[tbl] = cur.fetchone()[0]
     finally:

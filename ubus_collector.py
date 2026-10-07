@@ -62,6 +62,22 @@ BANDWIDTH_WINDOW_HOURS_DEFAULT = 24     # config['bandwidth_window_hours']
 # the resolution there would triple every router's row count and SVG path
 # length for a column too narrow to show the difference (§14).
 SSID_BUCKET_DEFAULT = 120               # config['ssid_interval'] (720/24h)
+# The fleet SSID history is kept for a month so the card's range picker can
+# show any day of it at full resolution (§17). Fleet-summed, so its size does
+# not grow with the router count: ~2.4 MB for 31 days at 120s, both tiers.
+SSID_KEEP_DAYS_DEFAULT = 31             # config['ssid_history_days']
+# Second tier: 10-minute rollups of the fleet series, so a multi-week range
+# reads ~13k rows instead of ~67k (43 ms vs 174 ms for 30 days on the Atom).
+# Must stay a multiple of ssid_interval; flask_app.py has the same constant.
+SSID_ROLLUP_SECONDS = 600
+# Per-router rows are only a staging area for the fleet sum now: a bucket's
+# fleet row is final once every router has flushed it, which happens within
+# one poll of the boundary. An hour is generous slack.
+SSID_STAGING_SECONDS = 3600
+# How long a stopping collector waits for router tasks to leave their poll
+# loop (and flush a closed SSID bucket) before cancelling them. A poll is a
+# few hundred ms; systemd's stop timeout is 90 s.
+SHUTDOWN_GRACE_SECONDS = 5
 # How often the bridge/carrier/wireless topology probe is re-run to
 # re-pick the uplink port. Cabling changes rarely; this is cheap insurance.
 TOPO_REFRESH_SECONDS = 300
@@ -228,7 +244,7 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bw_router_ts ON bandwidth_history(router_ip, ts)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_bw_ts ON bandwidth_history(ts)")
 
-    # ---- per-SSID associated-client counts (fleet graph, §16) ----
+    # ---- per-SSID associated-client counts (fleet graph, §16/§17) ----
     # One row per (bucket, router, SSID), carrying the mean number of clients
     # on that SSID over the polls that landed in the bucket. Deliberately a
     # separate table rather than more columns on bandwidth_history: that table
@@ -236,22 +252,18 @@ def init_db():
     # dimension that would need either a column per SSID (renaming an SSID
     # would need a migration) or a JSON blob.
     #
-    # It rides bandwidth_history's bucket boundaries, window and
-    # self-cleaning-on-write retention, so the dashboard can index both with
-    # the same arithmetic and neither waits on the daily retention pass.
-    #
-    # Stored per-router even though the graph is fleet-wide, because that is
+    # Since §17 this is only a STAGING table: per-router because that is
     # where the data is produced — each router task owns its own accumulator
-    # and flushes independently. The API sums across routers per bucket.
+    # and flushes independently — but the graph reads the fleet tables below,
+    # which save_ssid_bucket() recomputes from here on every flush. Rows
+    # outlive their bucket by SSID_STAGING_SECONDS, not by the display window.
     # Zero-client SSIDs are stored too: a configured-but-empty SSID is a real
     # zero, not a gap, and dropping those rows would make an all-quiet bucket
     # indistinguishable from an offline one.
     #
     # `interval` is the bucket length the row was written at. Rows at any
-    # other length are deleted on the next write, so changing `ssid_interval`
-    # self-heals instead of leaving up to 24 h of mixed-resolution history —
-    # which would render as a comb, since a coarser row only fills one of
-    # every N finer slots. The series refills within one window.
+    # other length are deleted on the next write, so a changed `ssid_interval`
+    # never sums two resolutions into one fleet row.
     cur.execute("""
         CREATE TABLE IF NOT EXISTS ssid_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -263,13 +275,43 @@ def init_db():
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ssid_hist_router_ts ON ssid_history(router_ip, ts)")
-    # (ts, ssid) rather than (ts): /api/ssid-clients does
-    # `GROUP BY ts, ssid` over the whole window — ~65k rows at 30 routers on
-    # a 120s bucket — and this lets SQLite stream the aggregate instead of
-    # sorting them. It still serves the ts-prefix retention DELETE, so the
-    # older ts-only index is redundant and dropped.
+    # (ts, ssid): the fleet recompute is `WHERE ts=? GROUP BY ssid`, which
+    # this serves as a stream. It also serves the ts-prefix retention DELETE.
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ssid_hist_ts_ssid ON ssid_history(ts, ssid)")
     cur.execute("DROP INDEX IF EXISTS idx_ssid_hist_ts")
+
+    # ---- fleet SSID history, the month the range picker reads (§17) ----
+    # Summed over routers at write time, so a month costs the same at 30
+    # routers as at 8: one row per (bucket, SSID), ~67k rows / ~2 MB for 31
+    # days at 120s. WITHOUT ROWID on (ts, ssid) — the table IS its index, and
+    # every read is a ts range.
+    #
+    # `clients` is the fleet sum of the per-router bucket means, i.e. the
+    # same value the old read-time SUM produced. A router offline for a whole
+    # bucket contributes nothing, so a fleet outage reads as a dip.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ssid_fleet_history (
+            ts INTEGER NOT NULL,
+            ssid TEXT NOT NULL,
+            clients INTEGER NOT NULL,
+            interval INTEGER NOT NULL,
+            PRIMARY KEY (ts, ssid)
+        ) WITHOUT ROWID
+    """)
+    # Second tier: SSID_ROLLUP_SECONDS buckets of the table above. Stores the
+    # SUM and COUNT rather than a mean, so any coarser step re-aggregates
+    # exactly (mean = SUM(sum)/SUM(n)), plus the busiest 120s value inside it
+    # for the hover readout's "max". Recomputed alongside its fine bucket.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ssid_fleet_rollup (
+            ts INTEGER NOT NULL,
+            ssid TEXT NOT NULL,
+            sum INTEGER NOT NULL,
+            n INTEGER NOT NULL,
+            max INTEGER NOT NULL,
+            PRIMARY KEY (ts, ssid)
+        ) WITHOUT ROWID
+    """)
 
     # ---- pfSense ARP cache (P2 #10) ----
     # MAC is canonicalised to lowercase so JOINs against clients.mac
@@ -372,6 +414,23 @@ def init_db():
             cur.execute(_ddl)
         except sqlite3.OperationalError:
             pass  # column already exists on existing DBs
+
+    # One-time seed of the fleet tiers from whatever per-router history
+    # exists (up to 24 h on a DB from before §17), so the month starts with
+    # a day in it instead of empty. Only when the fleet table is empty —
+    # afterwards save_ssid_bucket() owns it, and the staging rows it would
+    # read are trimmed to an hour.
+    if cur.execute("SELECT 1 FROM ssid_fleet_history LIMIT 1").fetchone() is None:
+        cur.execute("""
+            INSERT OR IGNORE INTO ssid_fleet_history (ts, ssid, clients, interval)
+            SELECT ts, ssid, SUM(clients), interval FROM ssid_history
+            WHERE interval IS NOT NULL GROUP BY ts, ssid
+        """)
+        cur.execute("""
+            INSERT OR REPLACE INTO ssid_fleet_rollup (ts, ssid, sum, n, max)
+            SELECT ts / ? * ?, ssid, SUM(clients), COUNT(*), MAX(clients)
+            FROM ssid_fleet_history GROUP BY ts / ?, ssid
+        """, (SSID_ROLLUP_SECONDS,) * 3)
 
     conn.commit()
     conn.close()
@@ -886,23 +945,30 @@ def save_bandwidth_bucket(router_ip: str, ts: int, rx: int, tx: int,
 
 
 def save_ssid_bucket(router_ip: str, ts: int, counts: dict[str, int],
-                     interval: int, window_hours: int):
-    """Append this router's per-SSID client means for one closed bucket.
+                     interval: int, keep_days: int):
+    """Stage this router's per-SSID client means for one closed bucket, then
+    refresh the fleet rows that bucket feeds (§17).
 
-    Self-cleaning on write, on the same window as save_bandwidth_bucket, so
-    the table stays pinned at ~(window / bucket) x (SSIDs on this router)
-    rows per router and never waits on the daily retention pass.
+    The fleet row for `ts` is recomputed from every router's staged rows on
+    every router's flush, so it is complete once the last router has flushed
+    — within one poll of the boundary — and nothing has to wait on "all N
+    routers reported". The 10-minute rollup that contains `ts` is recomputed
+    from the fleet tier the same way. Each step reads a few dozen rows at
+    most (~0.1 ms); at 30 routers that is 30 small transactions per bucket.
 
-    The same DELETE also drops rows written at any other bucket length, so a
-    change to `ssid_interval` clears the old resolution rather than leaving a
-    comb of partly-filled slots behind for a window. NULL `interval`
-    (pre-migration rows) counts as stale.
+    Staged rows are trimmed to SSID_STAGING_SECONDS, together with any row
+    written at another bucket length (NULL `interval` = pre-migration), so a
+    changed `ssid_interval` never sums two resolutions into one fleet row.
+    The fleet tiers are trimmed to `keep_days` in the same transaction —
+    self-cleaning on write, like every other bucket table.
 
     Every SSID the router had an interface for is written, zeros included —
     see the table comment in init_db().
     """
     if not counts:
         return
+    rollup_ts = ts // SSID_ROLLUP_SECONDS * SSID_ROLLUP_SECONDS
+    keep_cutoff = ts - keep_days * 86400
     conn = sqlite3.connect(DB_PATH)
     try:
         cur = conn.cursor()
@@ -914,12 +980,25 @@ def save_ssid_bucket(router_ip: str, ts: int, counts: dict[str, int],
         cur.execute(
             "DELETE FROM ssid_history WHERE router_ip=? "
             "AND (ts < ? OR interval IS NULL OR interval != ?)",
-            (router_ip, ts - window_hours * 3600, interval),
+            (router_ip, ts - SSID_STAGING_SECONDS, interval),
         )
+        cur.execute(
+            "INSERT OR REPLACE INTO ssid_fleet_history (ts, ssid, clients, interval) "
+            "SELECT ts, ssid, SUM(clients), ? FROM ssid_history "
+            "WHERE ts = ? AND interval = ? GROUP BY ssid",
+            (interval, ts, interval),
+        )
+        cur.execute(
+            "INSERT OR REPLACE INTO ssid_fleet_rollup (ts, ssid, sum, n, max) "
+            "SELECT ?, ssid, SUM(clients), COUNT(*), MAX(clients) "
+            "FROM ssid_fleet_history WHERE ts >= ? AND ts < ? GROUP BY ssid",
+            (rollup_ts, rollup_ts, rollup_ts + SSID_ROLLUP_SECONDS),
+        )
+        cur.execute("DELETE FROM ssid_fleet_history WHERE ts < ?", (keep_cutoff,))
+        cur.execute("DELETE FROM ssid_fleet_rollup WHERE ts < ?", (keep_cutoff,))
         conn.commit()
     finally:
         conn.close()
-
 
 
 def save_history(router_ip: str, interfaces: list[dict],
@@ -1216,6 +1295,8 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
     # SSID_BUCKET_DEFAULT.
     ssid_bucket = max(30, int(config.get("ssid_interval",
                                          SSID_BUCKET_DEFAULT)))
+    ssid_keep = max(1, int(config.get("ssid_history_days",
+                                      SSID_KEEP_DAYS_DEFAULT)))
     ssid_bucket_start: Optional[int] = None
     acc_ssid_sum: dict[str, int] = {}
     acc_ssid_n = 0
@@ -1276,6 +1357,8 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
                                                BANDWIDTH_WINDOW_HOURS_DEFAULT)))
                 ssid_bucket = max(30, int(cfg.get("ssid_interval",
                                                   SSID_BUCKET_DEFAULT)))
+                ssid_keep = max(1, int(cfg.get("ssid_history_days",
+                                               SSID_KEEP_DAYS_DEFAULT)))
                 override = (cfg.get("bandwidth_uplink") or {}).get(router_ip)
                 group, ifaces, src = pick_uplink(
                     topology["wired_up"], counters, override,
@@ -1325,8 +1408,8 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
             acc_cli_n += 1
 
             # The SSID series rolls over on its own, finer boundary. Also
-            # wall-clock aligned, so every router still shares boundaries and
-            # /api/ssid-clients can sum them by index.
+            # wall-clock aligned, so every router flushes the same `ts` and
+            # save_ssid_bucket() can sum them into one fleet row.
             s_bucket = int(time.time()) // ssid_bucket * ssid_bucket
             if ssid_bucket_start is None:
                 ssid_bucket_start = s_bucket
@@ -1336,7 +1419,7 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
                         router_ip, ssid_bucket_start,
                         {ssid: round(total / acc_ssid_n)
                          for ssid, total in acc_ssid_sum.items()},
-                        ssid_bucket, bw_window,
+                        ssid_bucket, ssid_keep,
                     )
                 ssid_bucket_start = s_bucket
                 acc_ssid_sum = {}
@@ -1392,6 +1475,20 @@ async def run_router(router_ip: str, config: dict, shutdown: asyncio.Event):
         except asyncio.TimeoutError:
             pass
 
+    # A bucket that has already closed but that this router hadn't flushed
+    # yet (it flushes on its first poll past the boundary) is complete — write
+    # it, or a restart in the first poll interval after a boundary leaves that
+    # bucket's fleet sum short of this router for the whole retained month.
+    # The bucket still in flight is NOT written: the restarted collector
+    # re-opens it, and two rows for one (bucket, router) would double-count.
+    if (ssid_bucket_start is not None and acc_ssid_n
+            and ssid_bucket_start + ssid_bucket <= time.time()):
+        save_ssid_bucket(
+            router_ip, ssid_bucket_start,
+            {ssid: round(total / acc_ssid_n)
+             for ssid, total in acc_ssid_sum.items()},
+            ssid_bucket, ssid_keep,
+        )
     if conn is not None:
         conn.close()
     logger.info(f"{router_ip}: stopped")
@@ -1718,7 +1815,12 @@ async def main():
     tasks.append(asyncio.create_task(trusted_loop(shutdown), name="pfsense-trusted"))
     tasks.append(asyncio.create_task(backup_loop(shutdown), name="backup"))
     await shutdown.wait()
-    logger.info("Shutdown signaled; cancelling tasks")
+    # Router tasks leave their loop on their own once `shutdown` is set (the
+    # inter-poll wait returns at once), so give an in-progress poll a moment
+    # to finish and run its exit flush before anything is cancelled.
+    logger.info("Shutdown signaled; letting router tasks finish")
+    await asyncio.wait(tasks[:len(routers)], timeout=SHUTDOWN_GRACE_SECONDS)
+    logger.info("Cancelling remaining tasks")
     for t in tasks:
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)

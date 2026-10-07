@@ -45,6 +45,8 @@ A web app that monitors WiFi clients across a fleet of OpenWrt routers (currentl
 - `clients` — associated stations; MAC, signal, signal_avg, noise, rx/tx_rate, rx/tx_packets, rx/tx_bytes, connected_time, inactive, authorized, last_seen, first_seen
 - `voucher_sessions` — active captive-portal sessions from pfSense, keyed by lowercased `mac`. `voucher_code` (= CP `username`), `authmethod`, `allow_time` (unix session start), `session_timeout` (s), `last_activity` (unix, pf-state derived), `last_seen`. **Full-replaced each collector cycle** (live snapshot, not history). Added 2026-07-27 — see §12.
 - `bandwidth_history` — per-router uplink throughput **and associated-client count**, one row per 6-minute bucket, 24 h deep. `ts` is a **unix INTEGER**, not the ISO string every other history table uses. Self-cleaning on write. Added 2026-09-10; window/bucket widened and `clients` added 2026-09-14 — see §13 and §14.
+- `ssid_history` — per-router per-SSID client means on a 120 s bucket. **Staging only since §17** (last hour); the graph reads the two fleet tables below.
+- `ssid_fleet_history` / `ssid_fleet_rollup` — fleet-summed clients per SSID, 120 s and 10 min tiers, **kept 31 days** for the SSID card's range picker. Unix-int `ts`, `WITHOUT ROWID`. Added 2026-10-08 — see §17.
 - `trusted_macs` — captive-portal allowed / pass-through MAC list (devices that bypass the portal, no voucher). `mac` PK (lowercased), `descr` (admin label), `last_seen`. Full-replaced each cycle. Added 2026-07-27 — see §12.
 
 **Important:** the `clients` table is destructive — every poll cycle does `DELETE FROM clients WHERE router_ip=? AND interface=?` and re-inserts. **No history is kept.** That's the single biggest cause of "rich data being discarded" that this project complains about.
@@ -860,6 +862,11 @@ Two small integers per existing row. Row count unchanged.
 
 ## 16. Feature Pass — 2026-09-17 (fleet clients-by-SSID card)
 
+> **Superseded in part by §17 (2026-10-08):** the card now keeps **31 days** and
+> has a range picker; the graph reads the fleet-summed `ssid_fleet_history` /
+> `ssid_fleet_rollup` tables, and `ssid_history` is a one-hour staging area. The
+> colour, overlay, gridline and hover rules below all still stand.
+
 A full-width card under the stats strip showing **24 h of associated clients per
 SSID**, fleet-wide (summed over every router): one overlaid series per SSID, on
 the same overlay design as the per-router client graph (§15), with a y-scale and
@@ -1092,3 +1099,129 @@ Self-healing; no backfill, same as §14/§15.
   aggregate and the per-SSID wireless counters are the inflated ones (§13).
 - **An SSID renamed on the routers** appears as a new series; the old name ages
   out of the window within 24 h. No rename tracking, and none is wanted.
+
+
+---
+
+## 17. Feature Pass — 2026-10-08 (SSID card: one month + range picker)
+
+The Clients-by-SSID card keeps **a month** and gets a range control: presets
+**24h · 2d · 3d · 7d · 14d · 30d** (rolling windows ending now) plus a **Dates**
+calendar that picks any run of whole local days inside the retained 31. The
+point count adapts to the range and the plot width.
+
+### Storage: fleet-summed, two tiers — size does not grow with routers
+
+Keeping `ssid_history` (per-router) for a month would be ~500k rows at 8 routers
+and ~2M at 30. The graph is fleet-wide, so the router dimension is summed away
+**at write time**:
+
+| Table | Grain | Kept | Rows (31 d, 3 SSIDs) |
+|---|---|---|---|
+| `ssid_history` | 120 s × router × SSID | **1 h** (`SSID_STAGING_SECONDS`) — staging | ~700 at 8 routers |
+| `ssid_fleet_history` | 120 s × SSID | 31 d (`ssid_history_days`) | ~67k |
+| `ssid_fleet_rollup` | 600 s × SSID (`sum`, `n`, `max`) | 31 d | ~13k |
+
+Both fleet tables are `WITHOUT ROWID` on `(ts, ssid)`. Measured on a synthetic
+31-day table: **~2.4 MB for both**, independent of router count (≈12 MB across
+the DB + 4 backups). 120 s is kept for the whole month on purpose — it is exactly
+one point per ~2.5 px at the smallest range (one day) on a 1830 px plot, so any
+single day in the month can be drawn at full resolution. Anything finer would be
+invisible.
+
+### Write path — `save_ssid_bucket()` does all of it, per router flush
+
+1. insert the router's staged rows; trim staging (1 h / wrong `interval`);
+2. `INSERT OR REPLACE` the **fleet row for that `ts`** = `SUM` over every
+   router's staged rows at that `ts`;
+3. `INSERT OR REPLACE` the **rollup row** containing that `ts` from the fleet tier;
+4. trim both fleet tiers to `keep_days`.
+
+Every router's flush recomputes the shared rows, so the fleet row is complete
+after the last router flushes (within one poll of the boundary) and nothing has
+to wait on "all N routers reported". ~4 ms per flush on the Atom; at 30 routers
+that is 30 small transactions per 120 s. The rollup stores `sum`/`n` rather than a
+mean so any coarser step re-aggregates exactly (`SUM(sum)/SUM(n)`).
+
+`init_db()` **seeds** both fleet tiers from `ssid_history` once (only when
+`ssid_fleet_history` is empty), so the first deploy kept its existing day of history.
+Verified: the seeded sums matched the old read-time `SUM` on all 2,163 buckets.
+
+### GOTCHA: graceful shutdown flushes the closed bucket
+
+A router flushes bucket B on its first poll *after* B closes. A restart in that
+~10 s window used to drop those routers' share of B; with 24 h retention the dip
+aged out in a day, with a month it would sit on the graph for 31 days (and every
+Settings save restarts the collector). So `main()` now waits up to
+`SHUTDOWN_GRACE_SECONDS` (5) for router tasks to leave their loop — they already
+`break` on `shutdown` — and `run_router()`'s exit path writes the pending SSID
+bucket **only if it has already closed**. The in-flight bucket is never written:
+the restarted collector re-opens it, and two staged rows for one
+`(bucket, router)` would double-count.
+
+### Read path — `GET /api/ssid-clients`
+
+Query: `span` (seconds, live — the presets; the **server** ends it at its own now),
+or `start`+`end` (unix — the calendar; a future `end` clamps to now and the range
+goes live), plus `px` (the plot's width). No parameters = last 24 h, as before.
+
+- **Step** = the smallest of `SSID_STEPS` (whole minutes/hours, multiples of the
+  stored interval) giving ≤ `px / 2.4` points. 24h → 120 s (720 pts), 2d → 240,
+  3d → 360, 7d → 1200 (504), 14d → 1800 (672), 30d → 3600 (720). A narrower
+  window gets a coarser step — fewer points to path and to hover.
+- **Tier**: any step that is a multiple of 600 s reads `ssid_fleet_rollup`, the rest
+  read the 120 s tier. Worst case, benchmarked on the Atom against a synthetic
+  full month: **~43 ms for 30 days** (vs 174 ms aggregating the 67k raw rows);
+  the 120 s tier is only read for ranges up to ~5 days (≤ 11k rows).
+- **Buckets are aligned to the step, not to `start`**, so a live window slides
+  without re-binning — no shimmer on refresh.
+- Values are the bucket **mean** (one decimal once binned). When `step > interval`
+  the response also has `max` — the busiest 120 s value per bucket — which only
+  the hover readout uses. `peak` / `peak_total` keep their §16 meanings.
+- **`refresh`** = seconds until the next fetch is worth making, computed on the
+  server clock: 30 s past the next `min(step, 600)` boundary, so a fetch never
+  lands while routers are still flushing a half-summed bucket. `null` for a range
+  that has ended — its data can't change, so the browser sets no timer at all.
+- `oldest` (first stored bucket) lets the calendar disable days with no data.
+
+### Dashboard (`templates/dashboard.html`)
+
+- **Range state** is `ssidReq`: `{span}` or `{start, end, from, to}`. Only the
+  preset is remembered (`localStorage['ssidRangeSpan']`, try/catch); a calendar pick
+  is absolute dates and would be stale tomorrow.
+- **`fetchSsidClients()` schedules itself** off the server's `refresh` (replacing
+  §16's fixed `setTimeout` chain), and a sequence counter drops a response that a
+  newer range click has superseded.
+- **Calendar** (`renderSsidCal`, hand-rolled, no library): one grid of whole weeks
+  covering the retained month, so every selectable day is visible without paging;
+  month tag on the 1st and on the first selectable day. Click the first day, then
+  the last (hover previews the run and counts days); one click twice = one day.
+  Days before `oldest` are disabled with a title. Esc / outside click / Cancel
+  close it. The popover and the hover tooltip layer `--card-bg` over `--bg-1`
+  because `--card-bg` is translucent and the graph showed through.
+- **Time axis** (`ssidTicks`): ticks on local clock boundaries, spacing from
+  1 h to 7 d chosen to leave ~80 px per label — "06:00 · 12:00" over a day,
+  "Sep 10 · Sep 12" over a month. Midnight ticks are labelled with the date and get
+  a solid vertical guide (others dashed), so a multi-day range reads as days.
+  Guides live in `.ssid-grid` (behind the SVG), same rule as the gridlines.
+- **Hover** header now carries the date, and the span for a binned point
+  ("Wed, Oct 7 07:00–07:04"); "Nh ago" only for a live range. Rows show the mean
+  and, when binned, `max N`. The two-gate rAF design from §16 is unchanged.
+
+### Config keys
+
+| Key | Default | Effect |
+|---|---|---|
+| `ssid_history_days` | 31 | Fleet-tier retention, and the calendar's selectable window. Re-read on the topology cadence. |
+| `ssid_interval` | 120 | Unchanged. Should divide 600 so rollup windows hold whole buckets. |
+
+### Open territory
+
+- **Changing `ssid_interval` no longer clears history** (only staging). Older fleet
+  rows keep their old resolution; a range whose step is finer than that old
+  interval renders combed until it ages out. Fine for a knob nobody turns.
+- **No pan/zoom** — the calendar is the zoom. Drag-to-select on the plot would be
+  the natural next step and needs no new API.
+- **`max` is drawn nowhere** — tooltip only. A faint max envelope behind the mean
+  would show peaks on 7d/30d views where hourly means flatten the rush hours.
+- **The fleet-total sparkline** (§14–§16 open territory) is still unwritten.
