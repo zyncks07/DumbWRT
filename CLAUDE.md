@@ -1225,3 +1225,62 @@ goes live), plus `px` (the plot's width). No parameters = last 24 h, as before.
 - **`max` is drawn nowhere** — tooltip only. A faint max envelope behind the mean
   would show peaks on 7d/30d views where hourly means flatten the rush hours.
 - **The fleet-total sparkline** (§14–§16 open territory) is still unwritten.
+
+
+---
+
+## 18. Bug-fix + Feature Pass — 2026-10-16 (SSH key wiped by whitelist save; key paste/upload)
+
+### Root cause: "Save IP Whitelist" on Settings wiped `ssh_key` and the router list
+
+`saveIPWhitelist()` in `config.html` POSTed `{allowed_ips}` alone to **`/api/config`**,
+whose handler defaulted every absent key: `ssh_key` → `''`, `routers` → `[]`,
+intervals → 10. The empty router list then counted as "all routers removed" and
+**deleted every router's `routers`/`interfaces`/`clients` rows**, and the endpoint
+restarted both services. The key file on disk was never touched — only the config
+pointer to it — which is why FileZilla still showed it. Re-entering routers by hand
+afterwards dropped `.247 DIR-2660`, and the read-only key-path field could not be
+refilled from the UI, so the collector logged `no ssh_key configured, skipping`.
+
+Evidence: dashboard journal `22:01:26 Removing router …` ×8 immediately before the
+`POST /api/config` that restarted services.
+
+### Fixes
+
+- `saveIPWhitelist()` now posts to **`/api/security/whitelist`** (touches only
+  `allowed_ips`, restarts nothing). That endpoint now trims/dedupes and rejects a
+  non-list.
+- **`/api/config` POST only writes keys present in the body**, for every key — not
+  just `pfsense_*`. `routers` (and therefore DB cleanup of removed routers) only
+  applies when a non-empty list is sent; an empty `ssh_key` never overwrites.
+  **Don't reintroduce `data.get(k, default)` assignments here.**
+- **`save_config()` is atomic** (tmp + fsync + `os.replace`). `load_config()` falls
+  back to defaults with `ssh_key: ''` on any read error, so a reader catching a
+  half-written file followed by any save would have persisted the wipe.
+- Live config restored: `ssh_key=/home/bulik/.ssh/id_ed25519`, `.247` re-added.
+  Pre-restore copy at `/etc/openwrt-monitor/config.json.pre-restore-20261016`.
+
+### Feature: install an existing key by paste or upload
+
+Settings → SSH Key Management → "Use an Existing Private Key": textarea + Upload
+File (read client-side via `FileReader`, so upload and paste share one path) →
+**`POST /api/ssh-key/install`** `{private_key, force?}`:
+
+1. Normalises CRLF; rejects > 16 KB, `.pub` contents, and PuTTY `.ppk` (with the
+   PuTTYgen export hint).
+2. Validates with `ssh-keygen -y -P ''` in a 0700 temp dir — passphrase-protected
+   keys are refused (the collector can't supply one).
+3. **Tests the key on every configured router in parallel** (`IdentitiesOnly`, no
+   host-key check — same as the collector's `known_hosts=None`). If **none** accept
+   it, returns 409 `needs_confirm` and saves nothing; the UI confirms before
+   retrying with `force`.
+4. If the same key already exists in `~bulik/.ssh/` (matching `.pub`), points config
+   at that file; otherwise saves `id_<type>_openwrt_<ts>` + `.pub` there (bulik, 600).
+5. Sets `ssh_key` and restarts **only** the collector.
+
+### Note: root's `known_hosts` is stale
+
+`/root/.ssh/known_hosts` has pre-25.12-reflash host keys, so plain `sudo ssh root@<ap>`
+fails with "REMOTE HOST IDENTIFICATION HAS CHANGED". The collector and the new key
+test don't check host keys, so they are unaffected. `/api/router-raw-data` (Logs
+page) does use plain `ssh` and will fail until those entries are refreshed.

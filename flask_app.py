@@ -91,9 +91,16 @@ def load_config():
         return {'routers': [], 'ssh_key': '', 'poll_interval': 10}
 
 def save_config(config):
+    # Write-then-rename so a concurrent load_config() never sees a truncated
+    # file — it would fall back to the defaults above (ssh_key '') and the
+    # next save would persist that.
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, 'w') as f:
+    tmp = CONFIG_PATH + '.tmp'
+    with open(tmp, 'w') as f:
         json.dump(config, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, CONFIG_PATH)
 
 @app.route('/')
 def index():
@@ -730,27 +737,29 @@ def api_config():
         return jsonify({'success': True, 'config': config})
     else:
         try:
-            data = request.json
-            old_config = load_config()
-            old_routers = set(old_config.get('routers', []))
-            new_routers = set(data.get('routers', []))
-            
-            # Find routers that were removed
-            removed_routers = old_routers - new_routers
-            
-            # Merge into the existing config; only touch the keys this form
-            # owns. Rebuilding from scratch here used to wipe keys written by
-            # other pages (history_retention_days, raw_log_lines,
-            # backup_keep_days from Maintenance; pfsense_* / history_interval),
-            # silently reverting retention/backup/pfSense settings on save.
-            config = old_config
-            config['ssh_key'] = data.get('ssh_key', '')
-            config['ssh_user'] = data.get('ssh_user', 'root')
-            config['poll_interval'] = int(data.get('poll_interval', 10))
-            config['ping_interval'] = int(data.get('ping_interval', 10))
-            config['routers'] = data.get('routers', [])
-            # pfSense integration — only update when the form sends these keys
-            # so that a POST from an older page version can't silently wipe them.
+            data = request.json or {}
+            config = load_config()
+
+            # Merge into the existing config, and only for keys actually
+            # present in the POST. Defaulting absent keys used to wipe state:
+            # the Settings page's "Save IP Whitelist" button posted only
+            # {allowed_ips}, which reset ssh_key to '' and routers to [] —
+            # and the empty router list then deleted every router from the DB
+            # below (2026-10-16).
+            if data.get('ssh_key'):
+                # The path field is read-only in the UI; an empty value is
+                # never a deliberate "clear the key", so it never overwrites.
+                config['ssh_key'] = data['ssh_key']
+            if 'ssh_user' in data:
+                config['ssh_user'] = data['ssh_user'] or 'root'
+            if 'poll_interval' in data:
+                config['poll_interval'] = int(data['poll_interval'] or 10)
+            if 'ping_interval' in data:
+                config['ping_interval'] = int(data['ping_interval'] or 10)
+            removed_routers = set()
+            if data.get('routers'):
+                removed_routers = set(config.get('routers', [])) - set(data['routers'])
+                config['routers'] = data['routers']
             for _k in ('pfsense_url', 'pfsense_api_key', 'allowed_ips'):
                 if _k in data:
                     config[_k] = data[_k]
@@ -878,6 +887,153 @@ def api_generate_ssh_key():
         return jsonify({'success': False, 'error': f'Failed to generate key: {e.stderr.decode()}'}), 500
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+SSH_KEY_MAX_BYTES = 16384  # a 4096-bit RSA key is ~3.3 KB; anything larger isn't a key
+
+
+def _test_key_on_routers(key_path, routers, user):
+    """Try a no-op SSH login with exactly this key on every router, in
+    parallel. Mirrors the collector: identity = this key only, host keys not
+    checked (collector uses known_hosts=None). Returns {ip: (ok, message)}."""
+    import subprocess
+    procs = {}
+    for ip in routers:
+        procs[ip] = subprocess.Popen(
+            ['ssh', '-i', key_path,
+             '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes',
+             '-o', 'ConnectTimeout=5',
+             '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null',
+             '-o', 'LogLevel=ERROR',
+             f'{user}@{ip}', 'true'],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, text=True)
+    results = {}
+    deadline = time.time() + 10
+    for ip, p in procs.items():
+        try:
+            _, err = p.communicate(timeout=max(0.1, deadline - time.time()))
+            msg = (err or '').strip().splitlines()
+            results[ip] = (p.returncode == 0, 'ok' if p.returncode == 0 else (msg[-1] if msg else f'exit {p.returncode}'))
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.communicate()
+            results[ip] = (False, 'timed out')
+    return results
+
+
+@app.route('/api/ssh-key/install', methods=['POST'])
+@login_required
+def api_ssh_key_install():
+    """Install an existing private key (pasted or uploaded) as the fleet key.
+
+    The key is validated with ssh-keygen, tested against every configured
+    router, and only then made active. If no router accepts it the request is
+    refused unless `force` is set, so a wrong paste can't take the whole fleet
+    offline. Activating restarts the collector, which reads ssh_key at start.
+    """
+    import subprocess
+    import tempfile
+    import pwd
+    import shutil
+
+    data = request.json or {}
+    text = data.get('private_key') or ''
+    force = bool(data.get('force'))
+
+    if len(text.encode()) > SSH_KEY_MAX_BYTES:
+        return jsonify({'success': False, 'error': 'File is too large to be an SSH private key'}), 400
+    # Windows editors / uploads bring CRLF, which OpenSSH-format keys reject.
+    text = text.replace('\r\n', '\n').replace('\r', '\n').strip() + '\n'
+    if 'PuTTY-User-Key-File' in text:
+        return jsonify({'success': False, 'error':
+            'This is a PuTTY .ppk key. Open it in PuTTYgen and use '
+            'Conversions → Export OpenSSH key, then upload that file.'}), 400
+    if 'PRIVATE KEY-----' not in text:
+        return jsonify({'success': False, 'error':
+            'Not a private key. Paste the private key file '
+            '(begins with -----BEGIN ... PRIVATE KEY-----), not the .pub.'}), 400
+
+    config = load_config()
+    routers = config.get('routers', [])
+    ssh_user = config.get('ssh_user', 'root')
+
+    workdir = tempfile.mkdtemp(prefix='owm-key-')  # mode 0700
+    try:
+        tmp_key = os.path.join(workdir, 'key')
+        fd = os.open(tmp_key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'w') as f:
+            f.write(text)
+
+        # -P '' makes an encrypted key fail instead of prompting; the
+        # collector has no way to supply a passphrase either.
+        r = subprocess.run(['ssh-keygen', '-y', '-P', '', '-f', tmp_key],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            err = (r.stderr or '').strip()
+            if 'passphrase' in err.lower() or 'incorrect' in err.lower():
+                err = 'Key is passphrase-protected. Remove the passphrase first (ssh-keygen -p -f <key>).'
+            return jsonify({'success': False, 'error': f'Invalid private key: {err or "unrecognised format"}'}), 400
+        public_key = r.stdout.strip()
+        key_type, key_blob = public_key.split()[:2]
+
+        results = _test_key_on_routers(tmp_key, routers, ssh_user) if routers else {}
+        accepted = sum(1 for ok, _ in results.values() if ok)
+        report = [{'ip': ip, 'ok': ok, 'message': msg} for ip, (ok, msg) in results.items()]
+        if routers and accepted == 0 and not force:
+            return jsonify({'success': False, 'needs_confirm': True, 'results': report,
+                            'error': 'No router accepted this key.'}), 409
+
+        # Store next to the generated keys (same dir, owner and mode), so the
+        # files are visible where the operator already looks for them. If this
+        # exact key is already on disk, point at that file instead of copying.
+        ssh_owner = os.environ.get('SUDO_USER', 'bulik')
+        ssh_dir = os.path.join(os.path.expanduser(f'~{ssh_owner}'), '.ssh')
+        os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
+        key_path = None
+        for name in sorted(os.listdir(ssh_dir)):
+            if not name.endswith('.pub'):
+                continue
+            try:
+                with open(os.path.join(ssh_dir, name)) as f:
+                    fields = f.read().split()
+            except OSError:
+                continue
+            priv = os.path.join(ssh_dir, name[:-4])
+            if fields[:2] == [key_type, key_blob] and os.path.isfile(priv):
+                key_path = priv
+                break
+        reused = key_path is not None
+        if not reused:
+            short = {'ssh-ed25519': 'ed25519', 'ssh-rsa': 'rsa'}.get(key_type, 'ecdsa' if key_type.startswith('ecdsa') else 'key')
+            key_path = os.path.join(ssh_dir, f"id_{short}_openwrt_{time.strftime('%Y%m%d_%H%M%S')}")
+            shutil.move(tmp_key, key_path)
+            os.chmod(key_path, 0o600)
+            with open(key_path + '.pub', 'w') as f:
+                f.write(f'{key_type} {key_blob} openwrt-monitor-uploaded\n')
+            os.chmod(key_path + '.pub', 0o644)
+            try:
+                pw = pwd.getpwnam(ssh_owner)
+                os.chown(key_path, pw.pw_uid, pw.pw_gid)
+                os.chown(key_path + '.pub', pw.pw_uid, pw.pw_gid)
+            except (KeyError, OSError):
+                pass
+
+        config = load_config()
+        config['ssh_key'] = key_path
+        save_config(config)
+        logger.info("SSH key set to %s by %s (%d/%d routers accepted)",
+                    key_path, _get_client_ip(), accepted, len(routers))
+        subprocess.Popen(['systemctl', 'restart', 'openwrt-collector'],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        return jsonify({'success': True, 'private_key_path': key_path, 'public_key': public_key,
+                        'reused_existing_file': reused, 'results': report,
+                        'accepted': accepted, 'total': len(routers)})
+    except Exception as e:
+        logger.error(f"Error installing SSH key: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 @app.route('/logs')
 @login_required
@@ -1010,7 +1166,10 @@ def api_security_whitelist():
     if request.method == 'GET':
         return jsonify({'success': True, 'allowed_ips': config.get('allowed_ips', [])})
     data = request.json or {}
-    config['allowed_ips'] = data.get('allowed_ips', config.get('allowed_ips', []))
+    ips = data.get('allowed_ips', config.get('allowed_ips', []))
+    if not isinstance(ips, list):
+        return jsonify({'success': False, 'error': 'allowed_ips must be a list'}), 400
+    config['allowed_ips'] = list(dict.fromkeys(str(ip).strip() for ip in ips if str(ip).strip()))
     save_config(config)
     logger.info("IP whitelist updated by %s: %s", _get_client_ip(), config['allowed_ips'])
     return jsonify({'success': True})

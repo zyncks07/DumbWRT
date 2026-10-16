@@ -448,6 +448,26 @@
                 </div>
 
                 <div class="form-group" style="margin-top: 15px;">
+                    <label class="form-label">Use an Existing Private Key</label>
+                    <textarea class="form-input" id="keyPaste" rows="4" spellcheck="false" autocomplete="off"
+                        placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"
+                        style="resize:vertical; font-size:10px;"></textarea>
+                    <div class="input-group" style="margin-top:8px;">
+                        <input type="file" id="keyFile" style="display:none" onchange="loadKeyFile(this)">
+                        <button class="btn btn-copy" onclick="document.getElementById('keyFile').click()">
+                            <i class="fas fa-file-upload"></i>
+                            Upload File
+                        </button>
+                        <button class="btn btn-copy" id="installKeyBtn" onclick="installKey(false)">
+                            <i class="fas fa-check"></i>
+                            Test &amp; Use Key
+                        </button>
+                    </div>
+                    <div class="help-text">Paste the private key or upload the file (e.g. <code>id_ed25519</code>, not the <code>.pub</code>). It is tested on every router first, then saved and the collector restarted.</div>
+                    <div class="alert" id="keyResult" style="margin-top:10px;"></div>
+                </div>
+
+                <div class="form-group">
                     <label class="form-label">SSH Key Path</label>
                     <input type="text" class="form-input" id="ssh_key" placeholder="/home/user/.ssh/id_ed25519" disabled>
                     <div class="help-text">Current private key location (read-only)</div>
@@ -798,6 +818,80 @@
             }
         }
 
+        function loadKeyFile(input) {
+            const file = input.files && input.files[0];
+            input.value = '';  // so picking the same file again still fires
+            if (!file) return;
+            if (file.size > 16384) {
+                showKeyResult('alert-error', 'That file is too large to be an SSH private key.');
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = () => { document.getElementById('keyPaste').value = reader.result; };
+            reader.readAsText(file);
+        }
+
+        function showKeyResult(cls, message, results) {
+            const box = document.getElementById('keyResult');
+            box.className = 'alert ' + cls;
+            box.textContent = message;
+            if (results && results.length) {
+                const ul = document.createElement('ul');
+                ul.style.cssText = 'margin:6px 0 0 18px; font-family:"Courier New",monospace; font-size:11px;';
+                for (const r of results) {
+                    const li = document.createElement('li');
+                    li.textContent = (r.ok ? '✓ ' : '✗ ') + r.ip + (r.ok ? '' : ' — ' + r.message);
+                    ul.appendChild(li);
+                }
+                box.appendChild(ul);
+            }
+            box.style.display = 'block';
+        }
+
+        async function installKey(force) {
+            const text = document.getElementById('keyPaste').value.trim();
+            if (!text) {
+                showKeyResult('alert-error', 'Paste a private key or upload a key file first.');
+                return;
+            }
+            const btn = document.getElementById('installKeyBtn');
+            const originalHTML = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner"></span> Testing on routers...';
+            try {
+                const res = await fetch('/api/ssh-key/install', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ private_key: text, force: force })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    document.getElementById('keyPaste').value = '';
+                    document.getElementById('ssh_key').value = data.private_key_path;
+                    currentSSHKey = data.public_key;
+                    document.getElementById('sshPublicKey').textContent = data.public_key;
+                    const where = data.reused_existing_file ? 'Using existing file ' : 'Saved as ';
+                    const cls = data.accepted === data.total ? 'alert-success' : 'alert-warning';
+                    showKeyResult(cls, where + data.private_key_path + ' — accepted by ' +
+                        data.accepted + '/' + data.total + ' routers. Collector restarted.', data.results);
+                } else if (data.needs_confirm) {
+                    showKeyResult('alert-error', 'No router accepted this key. It was NOT saved.', data.results);
+                    if (confirm('No router accepted this key, so monitoring will stop if you use it.\n\nUse it anyway?')) {
+                        btn.disabled = false;
+                        btn.innerHTML = originalHTML;
+                        return installKey(true);
+                    }
+                } else {
+                    showKeyResult('alert-error', data.error || 'Failed to install key');
+                }
+            } catch (error) {
+                showKeyResult('alert-error', 'Failed to install key: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalHTML;
+            }
+        }
+
         async function saveConfig() {
             const saveBtn = document.getElementById('saveBtn');
             const successAlert = document.getElementById('successAlert');
@@ -919,7 +1013,10 @@
             btn.innerHTML = '<span class="spinner"></span> Saving...';
 
             try {
-                const res = await fetch('/api/config', {
+                // Dedicated endpoint: touches only allowed_ips and restarts
+                // nothing. Posting a partial body to /api/config is what wiped
+                // ssh_key and the router list on 2026-10-16.
+                const res = await fetch('/api/security/whitelist', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ allowed_ips: ips })
