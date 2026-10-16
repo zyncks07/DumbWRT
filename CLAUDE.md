@@ -1278,9 +1278,11 @@ File (read client-side via `FileReader`, so upload and paste share one path) →
    at that file; otherwise saves `id_<type>_openwrt_<ts>` + `.pub` there (bulik, 600).
 5. Sets `ssh_key` and restarts **only** the collector.
 
-### Note: root's `known_hosts` is stale
+### Note: root's `known_hosts` (refreshed 2026-10-16)
 
-`/root/.ssh/known_hosts` has pre-25.12-reflash host keys, so plain `sudo ssh root@<ap>`
-fails with "REMOTE HOST IDENTIFICATION HAS CHANGED". The collector and the new key
-test don't check host keys, so they are unaffected. `/api/router-raw-data` (Logs
-page) does use plain `ssh` and will fail until those entries are refreshed.
+`/root/.ssh/known_hosts` held pre-25.12-reflash host keys, so plain `sudo ssh root@<ap>`
+and `/api/router-raw-data` (Logs page, plain `ssh`) failed with "REMOTE HOST
+IDENTIFICATION HAS CHANGED". Refreshed for all 8 APs via `ssh-keygen -R` +
+`ssh-keyscan -t ed25519`; backup at `/root/.ssh/known_hosts.bak-20261016`. The
+collector and the key test don't check host keys. **Reflashing an AP breaks this
+again** — re-run `ssh-keygen -R <ip>` + `ssh-keyscan` for it.
