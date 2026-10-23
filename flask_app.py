@@ -204,6 +204,20 @@ def api_routers():
     conn.close()
     return jsonify({'success': True, 'routers': routers})
 
+# Client IP / device name, resolved from pfSense ARP (alias a) and DHCP leases
+# (alias d) — both queries that list clients must join both. IP: ARP is the
+# live truth; a lease fills in when ARP has nothing, but only an active or
+# static one (an expired lease's IP may since have gone to another device).
+# Name: the admin's static-mapping label, then ARP's (DNS) hostname, then the
+# hostname the device sent in its DHCP request. Kept as arp_ip/arp_hostname
+# so the templates read them unchanged. The DHCP hostname is device-chosen
+# text — the templates must escape it.
+CLIENT_IP_SQL = ("COALESCE(NULLIF(a.ip, ''), "
+                 "CASE WHEN d.status IN ('active', 'static') THEN NULLIF(d.ip, '') END)")
+CLIENT_NAME_SQL = ("COALESCE(NULLIF(d.descr, ''), NULLIF(a.hostname, ''), "
+                   "NULLIF(d.hostname, ''))")
+
+
 @app.route('/api/router/<router_ip>')
 @login_required
 def api_router_detail(router_ip):
@@ -214,8 +228,8 @@ def api_router_detail(router_ip):
     cursor.execute('SELECT * FROM interfaces WHERE router_ip = ? ORDER BY interface', (router_ip,))
     interfaces = [dict(row) for row in cursor.fetchall()]
     for iface in interfaces:
-        cursor.execute("""
-            SELECT c.*, a.ip AS arp_ip, a.hostname AS arp_hostname,
+        cursor.execute(f"""
+            SELECT c.*, {CLIENT_IP_SQL} AS arp_ip, {CLIENT_NAME_SQL} AS arp_hostname,
                    v.voucher_code AS voucher_code,
                    v.authmethod   AS voucher_authmethod,
                    v.allow_time   AS voucher_start,
@@ -225,6 +239,7 @@ def api_router_detail(router_ip):
                    (t.mac IS NOT NULL) AS trusted
             FROM clients c
             LEFT JOIN arp_entries a ON lower(c.mac) = a.mac
+            LEFT JOIN dhcp_leases d ON lower(c.mac) = d.mac
             LEFT JOIN voucher_sessions v ON lower(c.mac) = v.mac
             LEFT JOIN trusted_macs t ON lower(c.mac) = t.mac
             WHERE c.router_ip = ? AND c.interface = ?
@@ -318,12 +333,12 @@ def api_router_detail(router_ip):
 def api_clients():
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("""
+    cursor.execute(f"""
         SELECT c.*,
                i.ssid, i.frequency, i.channel, i.bandwidth,
                r.hostname AS router_hostname,
-               a.ip       AS arp_ip,
-               a.hostname AS arp_hostname,
+               {CLIENT_IP_SQL}   AS arp_ip,
+               {CLIENT_NAME_SQL} AS arp_hostname,
                v.voucher_code AS voucher_code,
                v.authmethod   AS voucher_authmethod,
                v.allow_time   AS voucher_start,
@@ -338,6 +353,8 @@ def api_clients():
           ON c.router_ip = r.ip
         LEFT JOIN arp_entries a
           ON lower(c.mac) = a.mac
+        LEFT JOIN dhcp_leases d
+          ON lower(c.mac) = d.mac
         LEFT JOIN voucher_sessions v
           ON lower(c.mac) = v.mac
         LEFT JOIN trusted_macs t

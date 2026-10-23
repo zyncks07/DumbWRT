@@ -1,8 +1,8 @@
 """pfSense REST API client (read-only).
 
-Currently used by the collector to pull the ARP table so the UI can
-surface IP (and, when pfSense populates it, hostname) next to the
-raw MAC for every wifi client.
+Used by the collector to pull the ARP table and DHCP leases so the UI
+can surface IP and a device name next to the raw MAC for every wifi
+client, plus captive-portal voucher / allowed-MAC state.
 
 Authentication is via X-API-Key header against the
 pfSense-pkg-RESTAPI v2 package. SSL verification is disabled to
@@ -139,25 +139,95 @@ async def fetch_arp_table(base_url: str, api_key: str) -> list[dict]:
     return body.get("data") or []
 
 
-async def fetch_voucher_sessions(base_url: str, api_key: str) -> list[dict]:
+async def fetch_dhcp_leases(base_url: str, api_key: str) -> Optional[list[dict]]:
+    """GET /api/v2/status/dhcp_server/leases; the `data` list, or None on failure.
+
+    Unlike the ARP table this survives ARP-cache expiry, covers static
+    mappings, and carries names: the DHCP client hostname the device sent,
+    and the admin `descr` on static mappings. None (failed) is kept distinct
+    from [] so the caller doesn't wipe its last snapshot on a hiccup.
+    """
+    if not base_url or not api_key:
+        return []
+    url = base_url.rstrip("/") + "/api/v2/status/dhcp_server/leases"
+    body = await asyncio.to_thread(_fetch_sync, url, api_key)
+    if not body or body.get("code") != 200:
+        return None
+    return body.get("data") or []
+
+
+# Which lease wins when pfSense holds several for one MAC (a static mapping
+# plus a dynamic lease, or an old expired lease beside a fresh one).
+_LEASE_RANK = {"active": 0, "static": 1}
+
+
+def merge_leases(leases: list[dict]) -> dict[str, dict]:
+    """Collapse the lease list to one record per lowercased MAC.
+
+    The IP comes from the best lease: active, then static, then anything
+    else (expired), newest `ends` first within a rank. `ends` is pfSense's
+    'YYYY/MM/DD HH:MM:SS' string, which sorts correctly as text. Names are
+    gathered across all of the MAC's leases — an expired lease still names
+    the device even though its IP may since have been reassigned, so
+    `status` is kept for the reader to decide whether to trust the IP.
+    """
+    by_mac: dict[str, list[dict]] = {}
+    for l in leases:
+        mac = (l.get("mac") or "").strip().lower()
+        if mac:
+            by_mac.setdefault(mac, []).append(l)
+    out = {}
+    for mac, ls in by_mac.items():
+        ls.sort(key=lambda l: l.get("ends") or "", reverse=True)
+        ls.sort(key=lambda l: _LEASE_RANK.get(l.get("active_status"), 2))
+        best = ls[0]
+        out[mac] = {
+            "ip": best.get("ip") or "",
+            "status": best.get("active_status") or "",
+            "ends": best.get("ends") or "",
+            "hostname": next((l["hostname"] for l in ls if l.get("hostname")), ""),
+            "descr": next((l["descr"] for l in ls if l.get("descr")), ""),
+        }
+    return out
+
+
+async def _run_command(base_url: str, api_key: str, command: str) -> Optional[str]:
+    """Run a fixed command via POST /api/v2/diagnostics/command_prompt.
+
+    Returns stdout, or None when the call failed (network, auth, missing
+    Command Prompt privilege, non-zero exit). None is distinct from empty
+    output: the callers full-replace a table, so a failed fetch must not be
+    mistaken for "no rows" and wipe the last good snapshot.
+    """
+    url = base_url.rstrip("/") + "/api/v2/diagnostics/command_prompt"
+    body = await asyncio.to_thread(_post_sync, url, api_key, {"command": command})
+    if not body or body.get("code") != 200:
+        return None
+    data = body.get("data") or {}
+    if data.get("result_code") not in (0, None):
+        logger.warning(f"pfSense command exited {data.get('result_code')}: "
+                       f"{(data.get('output') or '')[:200]!r}")
+        return None
+    return data.get("output") or ""
+
+
+async def fetch_voucher_sessions(base_url: str, api_key: str) -> Optional[list[dict]]:
     """Return active captive-portal sessions from pfSense.
 
     There is no REST endpoint for captive-portal / voucher data, so we run
     VOUCHER_CMD through POST /api/v2/diagnostics/command_prompt (the GUI's
     Diagnostics > Command Prompt) and parse its stdout. Requires the API
     key/user to hold the "Diagnostics: Command Prompt" privilege; without
-    it the endpoint returns non-200 and we yield [].
+    it the endpoint returns non-200 and we return None (fetch failed).
 
     Each returned dict has: mac, ip, username (voucher code), allow_time
     (unix session start), session_timeout (seconds), authmethod.
     """
     if not base_url or not api_key:
         return []
-    url = base_url.rstrip("/") + "/api/v2/diagnostics/command_prompt"
-    body = await asyncio.to_thread(_post_sync, url, api_key, {"command": VOUCHER_CMD})
-    if not body or body.get("code") != 200:
-        return []
-    output = (body.get("data") or {}).get("output") or ""
+    output = await _run_command(base_url, api_key, VOUCHER_CMD)
+    if output is None:
+        return None
     sessions = []
     for line in output.splitlines():
         line = line.strip()
@@ -171,21 +241,19 @@ async def fetch_voucher_sessions(base_url: str, api_key: str) -> list[dict]:
     return sessions
 
 
-async def fetch_trusted_macs(base_url: str, api_key: str) -> list[dict]:
+async def fetch_trusted_macs(base_url: str, api_key: str) -> Optional[list[dict]]:
     """Return the captive-portal pass-through (Allowed) MAC list.
 
     Same command_prompt transport as fetch_voucher_sessions. Each dict has
-    mac, descr, action. Empty on any non-200 (e.g. missing Command Prompt
-    privilege). Changes rarely (admin-managed), so the collector polls this
-    on a slow interval.
+    mac, descr, action. None on any failure (e.g. missing Command Prompt
+    privilege), so the caller keeps its last snapshot. Changes rarely
+    (admin-managed), so the collector polls this on a slow interval.
     """
     if not base_url or not api_key:
         return []
-    url = base_url.rstrip("/") + "/api/v2/diagnostics/command_prompt"
-    body = await asyncio.to_thread(_post_sync, url, api_key, {"command": TRUSTED_CMD})
-    if not body or body.get("code") != 200:
-        return []
-    output = (body.get("data") or {}).get("output") or ""
+    output = await _run_command(base_url, api_key, TRUSTED_CMD)
+    if output is None:
+        return None
     macs = []
     for line in output.splitlines():
         line = line.strip()

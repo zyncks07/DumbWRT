@@ -1286,3 +1286,48 @@ IDENTIFICATION HAS CHANGED". Refreshed for all 8 APs via `ssh-keygen -R` +
 `ssh-keyscan -t ed25519`; backup at `/root/.ssh/known_hosts.bak-20261016`. The
 collector and the key test don't check host keys. **Reflashing an AP breaks this
 again** — re-run `ssh-keygen -R <ip>` + `ssh-keyscan` for it.
+
+---
+
+## 19. pfSense 2.9.0 upgrade — 2026-10-23 (compatibility check)
+
+pfSense upgraded to **2.9.0-RELEASE** with the matching `pfSense-pkg-RESTAPI`, new API
+key saved via Settings. **No endpoint or schema changes were needed**: `arp_table`
+(same `ip_address`/`mac_address`/`hostname`/`expires` fields), `command_prompt` (same
+`data.output`/`data.result_code`), and both php snippets (`SQLite3`,
+`captiveportal_get_last_activity`, `config_get_path`) all work unchanged on 2.9.0.
+The new schema still has **no captive-portal endpoint**, so §12's transport stands.
+It does expose `/api/v2/status/dhcp_server/leases` — the §10 DHCP-lease enrichment idea.
+
+The post-upgrade 401s (old key) and ~10 s timeouts (pfSense still settling) exposed a
+bug: a **failed** voucher/trusted fetch returned `[]`, and the full-replace then wiped
+the table until the next good cycle (5 min for trusted MACs). `pfsense._run_command()`
+now returns `None` on any failure (HTTP, auth, non-zero `result_code`), and both loops
+keep the last snapshot on `None`; `trusted_loop` retries on the voucher cadence after a
+failure. **Keep `None` (failed) distinct from `[]` (genuinely empty).**
+
+### DHCP-lease enrichment (same day)
+
+The §10 "next IP-enrichment improvement", done. Biggest effect is **names**, not IPs:
+`arp_entries` already upserts and keeps rows a day, so ARP expiry rarely lost an IP,
+but pfSense ARP returns `?` for almost every hostname. With leases, named clients went
+**0 → 18 of 23**.
+
+- **Source:** `GET /api/v2/status/dhcp_server/leases` (`pfsense.fetch_dhcp_leases`,
+  `None` on failure like the command_prompt fetches). Fields: `ip`, `mac`, `hostname`
+  (sent by the device in its DHCP request), `descr` (admin label, static mappings only),
+  `active_status` (`active`/`static`/`expired`), `ends` (`YYYY/MM/DD HH:MM:SS`).
+- **One MAC often has several leases** (static mapping + a dynamic lease on another
+  subnet, or an expired lease beside a fresh one — 11 such MACs live).
+  `pfsense.merge_leases()` collapses them: IP from the best lease (active → static →
+  other, newest `ends` first); `hostname`/`descr` gathered across all of the MAC's leases.
+- **`dhcp_leases` table** — one row per MAC, **full-replaced** each `dhcp_loop` cycle
+  (`pfsense_dhcp_interval`, default 120 s), bounded by pfSense's own lease table, no
+  retention needed. Keeps the last snapshot on a failed fetch.
+- **Resolution lives in `flask_app.py` `CLIENT_IP_SQL` / `CLIENT_NAME_SQL`**, shared by
+  `/api/clients` and `/api/router/<ip>` (both must `LEFT JOIN dhcp_leases d`). IP: ARP
+  first, then an `active`/`static` lease only — an expired lease's IP may have been
+  reassigned. Name: static-mapping `descr` → ARP hostname → DHCP hostname. Output keeps
+  the old `arp_ip` / `arp_hostname` field names so templates are unchanged.
+- **XSS:** the DHCP hostname is device-chosen text, so `arp_hostname` is now escaped
+  (`esc()` in clients.html, `vEsc()` in dashboard.html). Never render it raw.

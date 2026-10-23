@@ -47,6 +47,9 @@ PFSENSE_VOUCHER_INTERVAL_DEFAULT = 30
 # Seconds between pfSense allowed/pass-through MAC pulls. Admin-managed list
 # that changes rarely, so this polls much less often than voucher sessions.
 PFSENSE_TRUSTED_INTERVAL_DEFAULT = 300
+# Seconds between pfSense DHCP-lease pulls. Leases last hours to days and the
+# ARP pull already covers live IPs, so this only needs to be loose.
+PFSENSE_DHCP_INTERVAL_DEFAULT = 120
 
 # ---- Uplink bandwidth / client-count sampling ----
 # Byte counters and the associated-client count are read every poll and
@@ -356,6 +359,25 @@ def init_db():
         CREATE TABLE IF NOT EXISTS trusted_macs (
             mac TEXT PRIMARY KEY,
             descr TEXT,
+            last_seen DATETIME NOT NULL
+        )
+    """)
+
+    # ---- pfSense DHCP leases (one merged row per MAC) ----
+    # Full-replaced each dhcp_loop cycle, like trusted_macs, so it is bounded
+    # by pfSense's own lease table and needs no retention. Supplies the IP
+    # when ARP has none, and the device name: `hostname` is what the client
+    # sent in its DHCP request, `descr` the admin label on a static mapping.
+    # `status` is the winning lease's (active/static/expired) — an expired
+    # lease still names the device, but its IP is not trusted.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS dhcp_leases (
+            mac TEXT PRIMARY KEY,
+            ip TEXT,
+            hostname TEXT,
+            descr TEXT,
+            status TEXT,
+            ends TEXT,
             last_seen DATETIME NOT NULL
         )
     """)
@@ -1670,8 +1692,13 @@ async def voucher_loop(shutdown: asyncio.Event):
             if url and key:
                 _warned_unconfigured = False
                 sessions = await pfsense.fetch_voucher_sessions(url, key)
-                save_voucher_sessions(sessions)
-                logger.info(f"pfSense voucher sessions: {len(sessions)} active")
+                if sessions is None:
+                    # Failed fetch — keep the last snapshot rather than
+                    # full-replacing it with nothing.
+                    logger.warning("pfSense voucher fetch failed; keeping last snapshot")
+                else:
+                    save_voucher_sessions(sessions)
+                    logger.info(f"pfSense voucher sessions: {len(sessions)} active")
             else:
                 interval = max(interval, 300)
                 if not _warned_unconfigured:
@@ -1717,6 +1744,62 @@ def save_trusted_macs(macs: list[dict]):
         conn.close()
 
 
+def save_dhcp_leases(leases: list[dict]):
+    """Full-replace dhcp_leases with one merged record per MAC (see
+    pfsense.merge_leases). Same snapshot-mirror pattern as trusted_macs."""
+    merged = pfsense.merge_leases(leases)
+    now = datetime.now().isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM dhcp_leases")
+        cur.executemany("""
+            INSERT INTO dhcp_leases (mac, ip, hostname, descr, status, ends, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, [(mac, r["ip"], r["hostname"], r["descr"], r["status"], r["ends"], now)
+              for mac, r in merged.items()])
+        conn.commit()
+    finally:
+        conn.close()
+    return len(merged)
+
+
+async def dhcp_loop(shutdown: asyncio.Event):
+    """Pull pfSense DHCP leases on a loose interval. Same config-reread and
+    keep-last-snapshot-on-failure pattern as trusted_loop."""
+    _warned_unconfigured = False
+    while not shutdown.is_set():
+        cfg = load_config()
+        url = cfg.get("pfsense_url", "")
+        key = cfg.get("pfsense_api_key", "")
+        interval = int(cfg.get("pfsense_dhcp_interval", PFSENSE_DHCP_INTERVAL_DEFAULT))
+        try:
+            if url and key:
+                _warned_unconfigured = False
+                leases = await pfsense.fetch_dhcp_leases(url, key)
+                if leases is None:
+                    logger.warning("pfSense DHCP lease fetch failed; keeping last snapshot")
+                    interval = min(interval, PFSENSE_ARP_INTERVAL_DEFAULT)
+                else:
+                    n = save_dhcp_leases(leases)
+                    logger.info(f"pfSense DHCP leases: {len(leases)} leases, {n} MACs")
+            else:
+                interval = max(interval, 300)
+                if not _warned_unconfigured:
+                    logger.warning(
+                        "pfSense DHCP-lease enrichment not configured — "
+                        "set pfsense_url and pfsense_api_key via Settings or config.json"
+                    )
+                    _warned_unconfigured = True
+        except Exception as e:
+            logger.error(f"dhcp_loop error: {e}", exc_info=True)
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=interval)
+            break
+        except asyncio.TimeoutError:
+            pass
+
+
 async def trusted_loop(shutdown: asyncio.Event):
     """Pull the pfSense captive-portal allowed/pass-through MAC list on a slow
     interval. Same command_prompt transport and config-reread pattern as
@@ -1731,8 +1814,14 @@ async def trusted_loop(shutdown: asyncio.Event):
             if url and key:
                 _warned_unconfigured = False
                 macs = await pfsense.fetch_trusted_macs(url, key)
-                save_trusted_macs(macs)
-                logger.info(f"pfSense trusted MACs: {len(macs)} allowed")
+                if macs is None:
+                    # Failed fetch — keep the last snapshot, and retry on the
+                    # voucher cadence rather than waiting out the slow interval.
+                    logger.warning("pfSense trusted-MAC fetch failed; keeping last snapshot")
+                    interval = min(interval, PFSENSE_VOUCHER_INTERVAL_DEFAULT)
+                else:
+                    save_trusted_macs(macs)
+                    logger.info(f"pfSense trusted MACs: {len(macs)} allowed")
             else:
                 interval = max(interval, 300)
                 if not _warned_unconfigured:
@@ -1813,6 +1902,7 @@ async def main():
     tasks.append(asyncio.create_task(arp_loop(shutdown), name="pfsense-arp"))
     tasks.append(asyncio.create_task(voucher_loop(shutdown), name="pfsense-voucher"))
     tasks.append(asyncio.create_task(trusted_loop(shutdown), name="pfsense-trusted"))
+    tasks.append(asyncio.create_task(dhcp_loop(shutdown), name="pfsense-dhcp"))
     tasks.append(asyncio.create_task(backup_loop(shutdown), name="backup"))
     await shutdown.wait()
     # Router tasks leave their loop on their own once `shutdown` is set (the

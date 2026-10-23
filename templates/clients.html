@@ -449,7 +449,8 @@ function renderRows() {
         return;
     }
     body.innerHTML = filtered.map(c => {
-        const host = c.arp_hostname || '';
+        // Device-chosen DHCP hostname or admin label — escape before innerHTML.
+        const host = esc(c.arp_hostname || '');
         const ip   = c.arp_ip || '';
         const ident = host
             ? `<div class="hostname">${host}</div><div class="id-sub" data-copy="${ip || c.mac}" data-copy-label="${ip ? 'IP' : 'MAC'}">${ip || c.mac}</div>`
